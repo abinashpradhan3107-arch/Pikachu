@@ -155,7 +155,7 @@ export const aiSettingsSchema = z.object({
 
 export const lmsConnectSchema = z.object({
   siteUrl: z.string().trim().url("Enter your LMS URL."),
-  token: z.string().trim().min(10, "Paste your Moodle web service token.").max(500),
+  token: z.string().trim().min(10, "Paste your Moodle web service token.").max(500).optional(),
 });
 
 export const noteCreateSchema = z.object({

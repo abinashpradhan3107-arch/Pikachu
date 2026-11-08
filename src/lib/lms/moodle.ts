@@ -4,6 +4,104 @@ import type { Course, LmsConnection } from "@/lib/types";
 import { assertSafeRemoteUrl } from "@/lib/security";
 import { courseColor, nowIso, stripHtml, truncate } from "@/lib/utils";
 
+// LMS platform detection helpers
+const MOODLE_PATTERNS = [
+  /[?&]moodlews/,
+  /\/webservice\//i,
+  /moodle\.org/i,
+  /powered by moodle/i,
+  /moodle-lib/i,
+  /moodle\//i,
+];
+const CANVAS_PATTERNS = [/canvas\.net/i, /learning\.management\.system/i, /data-canvas/i];
+const BLACKBOARD_PATTERNS = [/blackboard/i, /bblearn/i, /webapps\/blackboard/i];
+
+function matchesAny(text: string, patterns: RegExp[]): boolean {
+  return patterns.some((re) => re.test(text));
+}
+
+/** Simple fetch with error handling. */
+async function safeFetch(input: RequestInfo, init?: RequestInit): Promise<Response | null> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch(input, { ...init, signal: controller.signal });
+    return res;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/** Attempt to identify the LMS platform from the site root HTML/headers. */
+export async function detectLMSPlatform(siteUrl: string): Promise<"moodle" | "custom" | "canvas" | "blackboard" | "unknown"> {
+  const base = siteUrl.replace(/\/+$/, "");
+  const clean = base.includes("://") ? base : `https://${base}`;
+
+  // 1) Try oembed or a shallow GET to check headers/body shape
+  let res: Response | null = null;
+  try {
+    res = await safeFetch(`${clean}/oembed?url=${encodeURIComponent(clean)}&format=json`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    // ignore
+  }
+
+  // 2) If oembed failed or returned nothing, try a plain GET of the site root
+  if (!res) {
+    try {
+      const r = await safeFetch(clean, { method: "GET", headers: { "Accept": "text/html" } });
+      if (r) res = r;
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!res || !res.body) return "unknown";
+
+  const text = await res.text();
+  const lower = text.toLowerCase();
+
+  // 3) Moodle markers
+  if (
+    matchesAny(lower, [
+      /[?&]moodlews/,
+      /\/webservice\//i,
+      /moodle\.org/i,
+      /powered by moodle/i,
+      /moodle-lib/i,
+      /moodle\//i,
+    ]) ||
+    (res.headers.get("x-powered-by")?.includes("PHP") ?? false) ||
+    lower.includes('name="logintoken"') ||
+    lower.includes('action="/login/"') ||
+    lower.includes('name="username"') ||
+    lower.includes('name="password"')
+  ) {
+    return "moodle";
+  }
+
+  // 4) Canvas-ish markers
+  if (matchesAny(lower, CANVAS_PATTERNS)) {
+    return "canvas";
+  }
+
+  // 5) Blackboard-ish markers
+  if (matchesAny(lower, BLACKBOARD_PATTERNS)) {
+    return "blackboard";
+  }
+
+  // 6) Anything that looks like an LMS but we can't classify
+  if (lower.includes("course") && (lower.includes("assignment") || lower.includes("syllabus"))) {
+    return "custom";
+  }
+
+  return "unknown";
+}
+
 export type MoodleSiteInfo = {
   sitename?: string;
   username?: string;

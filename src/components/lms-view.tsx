@@ -80,6 +80,7 @@ export function LmsView() {
   const [error, setError] = useState<string | null>(null);
   const [connectForm, setConnectForm] = useState({ siteUrl: "", token: "" });
   const [connecting, setConnecting] = useState(false);
+  const [connectStep, setConnectStep] = useState<"url" | "token" | "login" | "manual" | "sync">("url");
   const [syncing, setSyncing] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
@@ -144,30 +145,50 @@ export function LmsView() {
     try {
       const result = await apiFetch<{
         ok: boolean;
-        siteName: string;
-        username: string | null;
-        sync: SyncResult | null;
-        syncError: string | null;
+        platform: string;
+        authRequired?: boolean;
+        message?: string;
+        siteName?: string;
+        sync?: SyncResult | null;
+        syncError?: string;
       }>("/api/lms/connect", {
         method: "POST",
         body: JSON.stringify({
           siteUrl: connectForm.siteUrl.trim(),
-          token: connectForm.token.trim(),
+          token: connectStep === "token" ? connectForm.token.trim() : undefined,
         }),
       });
-      setConnectForm((current) => ({ ...current, token: "" }));
-      if (result.sync) {
-        setSyncSummary(
-          `Connected to ${result.siteName}. Synced ${result.sync.courses} courses, ${result.sync.assignments} assignments, ${result.sync.resources} materials, ${result.sync.announcements} announcements, and ${result.sync.events} events.`,
-        );
-        setSyncWarnings(result.sync.warnings);
+
+      if (result.platform === "moodle") {
+        // Moodle token flow
+        setConnectForm((current) => ({ ...current, token: "" }));
+        if (result.sync) {
+          setSyncSummary(
+            `Connected to ${result.siteName}. Synced ${result.sync.courses} courses, ${result.sync.assignments} assignments, ${result.sync.resources} materials, ${result.sync.announcements} announcements, and ${result.sync.events} events.`,
+          );
+          setSyncWarnings(result.sync.warnings);
+        } else {
+          setSyncSummary(`Connected to ${result.siteName}, but the initial sync did not finish.`);
+        }
+        if (result.syncError) {
+          setSyncWarnings((current) => [...current, result.syncError as string]);
+        }
+        toast.success("LMS connected", "Your token is encrypted at rest and never sent to the browser.");
+      } else if (result.platform === "custom" && result.authRequired) {
+        // Custom LMS: open login page
+        const loginUrl = `${connectForm.siteUrl}/login/index.php`;
+        window.open(loginUrl, "_blank", "noopener,noreferrer");
+        toast.info("LMS login opened", "A new tab opened to your LMS login page. Sign in, then return to Cortex and click Sync.");
+        setConnectStep("url");
+      } else if (result.platform === "unknown" || !result.ok) {
+        // Unknown or failed – show manual import info
+        toast.info("LMS not auto‑detected", result.message ?? "Use manual import to add materials.");
+        setConnectStep("manual");
       } else {
-        setSyncSummary(`Connected to ${result.siteName}, but the initial sync did not finish.`);
+        // Fallback: manual import
+        toast.info("LMS connection", result.message ?? "Use manual import to add materials.");
+        setConnectStep("manual");
       }
-      if (result.syncError) {
-        setSyncWarnings((current) => [...current, result.syncError as string]);
-      }
-      toast.success("LMS connected", "Your token is encrypted at rest and never sent to the browser.");
       await load();
     } catch (caught) {
       toast.error("Could not connect the LMS", errorMessage(caught));
@@ -591,78 +612,233 @@ export function LmsView() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
           <section className="surface p-4">
-            <div className="mb-4 flex items-start gap-3">
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-[#e7b44b]/20 bg-[#e7b44b]/10 text-[#e7b44b]">
-                <PlugZap className="size-4" />
-              </span>
-              <div>
-                <h2 className="text-[0.95rem] font-semibold text-[#f2f2ef]">Connect Moodle</h2>
-                <p className="mt-0.5 text-[0.74rem] leading-relaxed text-[#9aa1aa]">
-                  Use an official web-services token from your institution. Cortex does not ask for your password and never
-                  bypasses the LMS login.
+            {connectStep === "url" ? (
+              // URL‑entry step – ask for the LMS website
+              <form onSubmit={connect} className="space-y-3">
+                <div>
+                  <label className="label" htmlFor="lms-url">LMS website URL</label>
+                  <input
+                    id="lms-url"
+                    type="url"
+                    className="input"
+                    required
+                    placeholder="https://iitj-learn.masaischool.com"
+                    value={connectForm.siteUrl}
+                    onChange={(event) => setConnectForm({ ...connectForm, siteUrl: event.target.value })}
+                  />
+                  <p className="mt-2 text-[0.66rem] text-[#6d747d]">
+                    Enter your LMS website URL. We will detect the platform and show the correct connection method.
+                  </p>
+                </div>
+                <button type="submit" className="btn btn-primary" disabled={connecting}>
+                  {connecting ? <Loader2 className="size-4 animate-spin" /> : <PlugZap className="size-4" />}
+                </button>
+              </form>
+            ) : connectStep === "token" ? (
+              // Moodle token form – shown after URL is detected as Moodle
+              <form onSubmit={connect} className="space-y-3">
+                <div>
+                  <label className="label" htmlFor="lms-url">Moodle site URL</label>
+                  <input
+                    id="lms-url"
+                    type="url"
+                    className="input"
+                    required
+                    placeholder="https://moodle.iitj.ac.in"
+                    value={connectForm.siteUrl}
+                    onChange={(event) => setConnectForm({ ...connectForm, siteUrl: event.target.value })}
+                  />
+                  <p className="mt-2 text-[0.66rem] text-[#6d747d]">
+                    Your official Moodle site URL.
+                  </p>
+                </div>
+                <div>
+                  <label className="label" htmlFor="lms-token">Web services token</label>
+                  <input
+                    id="lms-token"
+                    type="password"
+                    className="input"
+                    required
+                    autoComplete="off"
+                    placeholder="Paste the token from Moodle → Preferences → Security keys"
+                    value={connectForm.token}
+                    onChange={(event) => setConnectForm({ ...connectForm, token: event.target.value })}
+                  />
+                  <p className="mt-1.5 flex items-start gap-1.5 text-[0.66rem] leading-relaxed text-[#6d747d]">
+                    <ShieldCheck className="mt-0.5 size-3 shrink-0" />
+                    The token is encrypted with AES-256-GCM and is never sent to the browser after saving.
+                  </p>
+                </div>
+                <button type="submit" className="btn btn-primary" disabled={connecting}>
+                  {connecting ? <Loader2 className="size-4 animate-spin" /> : <PlugZap className="size-4" />}
+                  {connecting ? "Connecting and syncing…" : "Connect and sync"}
+                </button>
+              </form>
+            ) : connectStep === "login" ? (
+              // Custom LMS – open login page
+              <div className="space-y-4">
+                <p className="text-[0.76rem] leading-relaxed text-[#9aa1aa]">
+                  Opening your LMS login page…
                 </p>
-              </div>
-            </div>
-
-            <form onSubmit={connect} className="space-y-3">
-              <div>
-                <label className="label" htmlFor="lms-url">Moodle site URL</label>
-                <input
-                  id="lms-url"
-                  type="url"
-                  className="input"
-                  required
-                  placeholder="https://lms.iitj.ac.in"
-                  value={connectForm.siteUrl}
-                  onChange={(event) => setConnectForm({ ...connectForm, siteUrl: event.target.value })}
-                />
-              </div>
-              <div>
-                <label className="label" htmlFor="lms-token">Web services token</label>
-                <input
-                  id="lms-token"
-                  type="password"
-                  className="input"
-                  required
-                  autoComplete="off"
-                  placeholder="Paste the token from Moodle → Preferences → Security keys"
-                  value={connectForm.token}
-                  onChange={(event) => setConnectForm({ ...connectForm, token: event.target.value })}
-                />
-                <p className="mt-1.5 flex items-start gap-1.5 text-[0.66rem] leading-relaxed text-[#6d747d]">
-                  <ShieldCheck className="mt-0.5 size-3 shrink-0" />
-                  The token is encrypted with AES-256-GCM and is never sent to the browser after saving.
+                <p className="text-[0.7rem] text-[#6d747d]">
+                  Sign in with your institutional credentials. After logging in, return to Cortex and click <button className="btn btn-primary" onClick={() => setConnectStep("sync")}>Sync</button> to import your data.
                 </p>
+                <a
+                  href={connectForm.siteUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-secondary">
+                  Open LMS in new tab
+                </a>
               </div>
-              <button type="submit" className="btn btn-primary" disabled={connecting}>
-                {connecting ? <Loader2 className="size-4 animate-spin" /> : <PlugZap className="size-4" />}
-                {connecting ? "Connecting and syncing…" : "Connect and sync"}
-              </button>
-            </form>
-          </section>
-
-          <section className="surface p-4">
-            <SectionHeader title="How to get a token" description="Exact labels vary slightly by Moodle theme" />
-            <ol className="space-y-2.5 text-[0.76rem] leading-relaxed text-[#9aa1aa]">
-              {[
-                "Open your Moodle site and sign in normally.",
-                "Go to your profile → Preferences → Security keys (or Account → Security keys).",
-                "Choose Create key, give it a name such as Cortex, and copy the token.",
-                "If Security keys is unavailable, ask your Moodle administrator to enable web services for your account.",
-                "Required functions include site info, enrolled courses, course contents, assignments, calendar, and forums.",
-              ].map((step, index) => (
-                <li key={index} className="flex gap-2.5">
-                  <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.04] text-[0.62rem] font-semibold text-[#9aa1aa]">
-                    {index + 1}
-                  </span>
-                  <span>{step}</span>
-                </li>
-              ))}
-            </ol>
-            <Callout tone="info" icon={ShieldCheck} title="No credentials stored">
-              Cortex only stores the encrypted token. Disconnecting deletes the token but keeps previously imported courses and
-              materials so your notes are not lost.
-            </Callout>
+            ) : connectStep === "manual" ? (
+              // Manual import fallback
+              <div className="surface p-4">
+                <SectionHeader title="Manual import" description="Use this when your LMS does not allow tokens, or for handouts and scanned notes." />
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <Chip active={importMode === "text"} onClick={() => setImportMode("text")}>
+                    Paste text or link
+                  </Chip>
+                  <Chip active={importMode === "pdf"} onClick={() => setImportMode("pdf")}>
+                    Upload a PDF
+                  </Chip>
+                </div>
+                {importMode === "text" ? (
+                  <form onSubmit={importText} className="space-y-3">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="label" htmlFor="import-title">Title</label>
+                        <input
+                          id="import-title"
+                          className="input"
+                          required
+                          placeholder="e.g. Unit 3 handout"
+                          value={textForm.title}
+                          onChange={(event) => setTextForm({ ...textForm, title: event.target.value })}
+                        />
+                      </div>
+                      <div>
+                        <label className="label" htmlFor="import-course">Course</label>
+                        <select
+                          id="import-course"
+                          className="input"
+                          value={textForm.courseId}
+                          onChange={(event) => setTextForm({ ...textForm, courseId: event.target.value })}
+                        >
+                          <option value="">General</option>
+                          {courses.map((course) => (
+                            <option key={course.id} value={course.id}>
+                              {course.code ? `${course.code} — ` : ""}
+                              {course.title}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="import-source">Source URL (optional)</label>
+                      <input
+                        id="import-source"
+                        type="url"
+                        className="input"
+                        placeholder="https://…"
+                        value={textForm.sourceUrl}
+                        onChange={(event) => setTextForm({ ...textForm, sourceUrl: event.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="import-text">Text</label>
+                      <textarea
+                        id="import-text"
+                        className="input"
+                        rows={7}
+                        required
+                        placeholder="Paste lecture notes, a handout, or the text of a page. Minimum 20 characters."
+                        value={textForm.text}
+                        onChange={(event) => setTextForm({ ...textForm, text: event.target.value })}
+                      />
+                    </div>
+                    <button type="submit" className="btn btn-primary" disabled={importing}>
+                      {importing ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                      {importing ? "Importing…" : "Import text"}
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={importPdf} className="space-y-3">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="label" htmlFor="pdf-title">Title (optional)</label>
+                        <input
+                          id="pdf-title"
+                          className="input"
+                          placeholder="Defaults to the file name"
+                          value={pdfForm.title}
+                          onChange={(event) => setPdfForm({ ...pdfForm, title: event.target.value })}
+                        />
+                      </div>
+                      <div>
+                        <label className="label" htmlFor="pdf-course">Course</label>
+                        <select
+                          id="pdf-course"
+                          className="input"
+                          value={pdfForm.courseId}
+                          onChange={(event) => setPdfForm({ ...pdfForm, courseId: event.target.value })}
+                        >
+                          <option value="">General</option>
+                          {courses.map((course) => (
+                            <option key={course.id} value={course.id}>
+                              {course.code ? `${course.code} — ` : ""}
+                              {course.title}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="pdf-file">PDF file (max 15 MB, text layer required)</label>
+                      <input
+                        id="pdf-file"
+                        ref={fileInput}
+                        type="file"
+                        accept="application/pdf,.pdf"
+                        className="input file:mr-3 file:rounded-md file:border-0 file:bg-white/10 file:px-2.5 file:py-1 file:text-[0.72rem] file:text-[#f2f2ef]"
+                        onChange={(event) => setPdfFile(event.target.files?.[0] ?? null)}
+                      />
+                      <p className="mt-1.5 text-[0.66rem] text-[#6d747d]">
+                        Scanned PDFs without a text layer need OCR before import. Files are parsed on the server and are not sent to a third party.
+                      </p>
+                    </div>
+                    <button type="submit" className="btn btn-primary" disabled={importing || !pdfFile}>
+                      {importing ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
+                      {importing ? "Extracting text…" : "Upload and import"}
+                    </button>
+                  </form>
+                )}
+                <div className="mt-4 rounded-xl border border-white/[0.06] bg-white/[0.015] px-3.5 py-3">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex items-start gap-2.5">
+                      <Link2 className="mt-0.5 size-4 shrink-0 text-[#9aa1aa]" />
+                      <div>
+                        <p className="text-[0.78rem] font-semibold text-[#f2f2ef]">
+                          Capture text from a browser page
+                        </p>
+                        <p className="mt-0.5 text-[0.7rem] leading-relaxed text-[#9aa1aa]">
+                          Create a bookmark whose URL is the snippet below. On any LMS page, click it to copy the visible text, then
+                          paste it into Manual import. It does not log in for you or bypass permissions.
+                        </p>
+                      </div>
+                    </div>
+                    <button type="button" className="btn btn-secondary btn-sm shrink-0" onClick={() => void copyBookmarklet()}>
+                      {bookmarkletCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                      {bookmarkletCopied ? "Copied" : "Copy bookmarklet"}
+                    </button>
+                  </div>
+                  <pre className="mt-2 overflow-x-auto rounded-lg border border-white/[0.06] bg-black/30 px-2.5 py-2 text-[0.62rem] leading-relaxed text-[#9aa1aa]">
+                    {BOOKMARKLET}
+                  </pre>
+                </div>
+              </div>
+            ) : null}
           </section>
         </div>
       )}

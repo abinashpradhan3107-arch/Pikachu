@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Cortex LMS Sync",
+  "version": "2.0.0",
+  "description": "Persistent LMS integration for Cortex AI Study Assistant - detects courses, lectures, assignments and syncs to backend",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "webNavigation",
+    "scripting",
+    "debugging",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://iitj-learn.masaischool.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://iitj-learn.masaischool.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["*.js", "*.css"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
