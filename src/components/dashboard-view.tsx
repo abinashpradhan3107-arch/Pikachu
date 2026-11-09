@@ -30,12 +30,32 @@ import { useToast } from "@/components/ui/toast";
 import { apiFetch, errorMessage } from "@/lib/client";
 import type { StudyStats } from "@/lib/stats";
 import type { Profile, StudyTask } from "@/lib/types";
-import { cn, formatDate, minutesToLabel, relativeDay } from "@/lib/utils";
+import { cn, formatDate, minutesToLabel, relativeDay, timeWindowLabel } from "@/lib/utils";
 
 type DashboardData = {
   stats: StudyStats;
   profile: Profile;
   plan: { summary: string | null; ai_briefing: string | null; total_minutes: number } | null;
+  backlog: Array<{
+    id: string;
+    title: string;
+    url: string | null;
+    duration_minutes: number | null;
+    course_title: string | null;
+    chapter_title: string | null;
+    synced_at: string;
+  }>;
+  backlogCount: number;
+  quizAccuracy: Array<{
+    chapter_id: string;
+    chapter_title: string | null;
+    course_title: string | null;
+    score: number;
+    total: number;
+    attempts: number;
+    accuracy: number | null;
+  }>;
+  rescheduled: number;
   ai: { configured: boolean; source: string; model: string; hasYoutubeKey: boolean };
   lms: {
     connected: boolean;
@@ -68,6 +88,7 @@ export function DashboardView({ userName }: { userName: string }) {
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [toggling, setToggling] = useState<string | null>(null);
+  const [watching, setWatching] = useState<string | null>(null);
   const [greeting, setGreeting] = useState("Welcome back");
 
   const load = useCallback(async () => {
@@ -125,6 +146,21 @@ export function DashboardView({ userName }: { userName: string }) {
     }
   }
 
+  async function toggleWatched(resourceId: string, watched: boolean) {
+    setWatching(resourceId);
+    try {
+      await apiFetch(`/api/resources/${resourceId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ watched }),
+      });
+      await load();
+    } catch (caught) {
+      toast.error("Could not update the lecture", errorMessage(caught));
+    } finally {
+      setWatching(null);
+    }
+  }
+
   if (loading) {
     return (
       <div className="space-y-5">
@@ -157,12 +193,20 @@ export function DashboardView({ userName }: { userName: string }) {
     );
   }
 
-  const { stats, profile, plan, ai, lms } = data;
+  const { stats, profile, plan, backlog, quizAccuracy, rescheduled, ai, lms } = data;
   const pendingToday = stats.todayTasks.filter((task) => task.status !== "completed");
   const completedToday = stats.todayTasks.filter((task) => task.status === "completed");
   const topTask = pendingToday[0] ?? null;
   const nextExam = stats.nextExam;
   const maxWeekly = Math.max(60, ...stats.weekly.map((day) => Math.max(day.minutes, day.planned)));
+  // Chapters measured at under 60% quiz accuracy, excluding ones already
+  // surfaced from confidence/difficulty - measured weakness, not guessed.
+  const lowAccuracy = quizAccuracy.filter(
+    (row) =>
+      row.accuracy !== null &&
+      row.accuracy < 60 &&
+      !stats.weakTopics.some((chapter) => chapter.id === row.chapter_id),
+  );
 
   return (
     <div className="space-y-5">
@@ -295,6 +339,7 @@ export function DashboardView({ userName }: { userName: string }) {
                       stats.todayTasks.slice(0, 7).map((task) => {
                         const course = stats.courses.find((item) => item.id === task.course_id);
                         const done = task.status === "completed";
+                        const slot = timeWindowLabel(task.start_time, task.duration_minutes);
                         return (
                           <div
                             key={task.id}
@@ -338,6 +383,10 @@ export function DashboardView({ userName }: { userName: string }) {
                                 </span>
                               </div>
                               <p className="mt-0.5 text-[0.68rem] text-[#6d747d]">
+                                {slot ? (
+                                  <span className="font-medium text-[#f3c96b]">{slot}</span>
+                                ) : null}
+                                {slot ? " · " : ""}
                                 {course ? `${course.title} · ` : ""}
                                 {minutesToLabel(task.duration_minutes)} · {task.task_type}
                                 {task.rescheduled_from ? ` · moved from ${formatDate(task.rescheduled_from)}` : ""}
@@ -354,7 +403,9 @@ export function DashboardView({ userName }: { userName: string }) {
                                   rel="noopener noreferrer"
                                   className="mt-1 inline-flex items-center gap-1 text-[0.68rem] font-medium text-[#f3c96b] hover:underline"
                                 >
-                                  {task.resource_title ?? "Open resource"} <ArrowRight className="size-3" />
+                                  {task.resource_title ??
+                                    (task.task_type === "assignment" ? "Open assignment" : "Open lecture in LMS")}{" "}
+                                  <ArrowRight className="size-3" />
                                 </a>
                               ) : null}
                             </div>
@@ -514,8 +565,78 @@ export function DashboardView({ userName }: { userName: string }) {
           </section>
 
           <section className="surface p-4">
+            <SectionHeader
+              title="Catch-up backlog"
+              description="LMS lectures you have not marked as watched yet"
+              action={
+                <Link href="/courses" className="text-[0.7rem] font-medium text-[#f3c96b] hover:underline">
+                  All lectures
+                </Link>
+              }
+            />
+            {rescheduled > 0 ? (
+              <p className="mb-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-2 text-[0.68rem] text-[#9aa1aa]">
+                {rescheduled} missed task{rescheduled === 1 ? "" : "s"} moved into your next free study block
+                automatically.
+              </p>
+            ) : null}
+            {backlog.length ? (
+              <div className="space-y-2">
+                {backlog.slice(0, 5).map((lecture) => (
+                  <div
+                    key={lecture.id}
+                    className="flex items-start gap-2.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-2"
+                  >
+                    <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-[#e7b44b]/10 text-[#e7b44b]">
+                      <Clock className="size-3.5" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[0.76rem] font-medium text-[#f2f2ef]">{lecture.title}</p>
+                      <p className="mt-0.5 truncate text-[0.64rem] text-[#6d747d]">
+                        {lecture.chapter_title ? `${lecture.chapter_title} · ` : ""}
+                        {lecture.course_title ?? "General"}
+                        {lecture.duration_minutes ? ` · ${minutesToLabel(lecture.duration_minutes)}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      {lecture.url ? (
+                        <a
+                          href={lecture.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn btn-ghost btn-icon p-1.5 text-[#f3c96b]"
+                          aria-label={`Open ${lecture.title} in the LMS`}
+                        >
+                          <ArrowRight className="size-3.5" />
+                        </a>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        disabled={watching === lecture.id}
+                        onClick={() => void toggleWatched(lecture.id, true)}
+                      >
+                        {watching === lecture.id ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <Check className="size-3" />
+                        )}{" "}
+                        Mark watched
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="py-4 text-center text-[0.76rem] text-[#6d747d]">
+                Nothing waiting. Unwatched LMS lectures show up here as the extension syncs them.
+              </p>
+            )}
+          </section>
+
+          <section className="surface p-4">
             <SectionHeader title="Weak topics" description="Low confidence or hard and untouched" />
-            {stats.weakTopics.length ? (
+            {stats.weakTopics.length || lowAccuracy.length ? (
               <div className="space-y-2">
                 {stats.weakTopics.slice(0, 4).map((chapter) => (
                   <div key={chapter.id} className="flex items-center gap-2.5">
@@ -529,6 +650,23 @@ export function DashboardView({ userName }: { userName: string }) {
                       </p>
                     </div>
                     <span className="badge shrink-0 px-1.5 py-0.5 text-[0.58rem]">{chapter.difficulty}</span>
+                  </div>
+                ))}
+                {lowAccuracy.slice(0, 2).map((row) => (
+                  <div key={row.chapter_id} className="flex items-center gap-2.5">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-[#f08a8a]/10 text-[#f08a8a]">
+                      <Target className="size-3.5" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[0.75rem] font-medium text-[#f2f2ef]">
+                        {row.chapter_title ?? "Unknown chapter"}
+                      </p>
+                      <p className="truncate text-[0.64rem] text-[#6d747d]">
+                        {row.course_title ? `${row.course_title} · ` : ""}quiz accuracy {row.accuracy}% over{" "}
+                        {row.attempts} attempt{row.attempts === 1 ? "" : "s"}
+                      </p>
+                    </div>
+                    <span className="badge badge-red shrink-0 px-1.5 py-0.5 text-[0.58rem]">{row.accuracy}%</span>
                   </div>
                 ))}
                 <Link href="/progress" className="mt-1 inline-flex items-center gap-1 text-[0.7rem] font-medium text-[#f3c96b] hover:underline">

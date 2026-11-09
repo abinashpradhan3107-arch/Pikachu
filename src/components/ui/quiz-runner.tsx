@@ -8,9 +8,11 @@ import type { QuizQuestion } from "@/lib/types";
 export function QuizRunner({
   questions,
   title,
+  onSubmitted,
 }: {
   questions: QuizQuestion[];
   title?: string;
+  onSubmitted?: (result: { score: number; total: number }) => void;
 }) {
   const [answers, setAnswers] = useState<Record<number, number>>({});
   const [submitted, setSubmitted] = useState(false);
@@ -62,7 +64,11 @@ export function QuizRunner({
             type="button"
             className="btn btn-primary btn-sm"
             disabled={answeredCount !== questions.length}
-            onClick={() => setSubmitted(true)}
+            onClick={() => {
+              setSubmitted(true);
+              // Report the real score so weak-topic tracking has data.
+              onSubmitted?.({ score, total: questions.length });
+            }}
           >
             <Check className="size-3.5" /> Check answers
           </button>

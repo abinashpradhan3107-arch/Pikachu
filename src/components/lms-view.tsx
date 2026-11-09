@@ -6,6 +6,7 @@ import {
   CalendarDays,
   Check,
   ClipboardList,
+  Clock,
   Copy,
   ExternalLink,
   FileText,
@@ -29,8 +30,8 @@ import { Callout, Chip, PageHeader, SectionHeader, StatCard } from "@/components
 import { EmptyState, LoadingBlock } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { apiFetch, errorMessage } from "@/lib/client";
-import type { Announcement, CalendarEvent, Course, Resource } from "@/lib/types";
-import { cn, formatDate, formatDateTime, truncate } from "@/lib/utils";
+import type { Announcement, CalendarEvent, Chapter, Course, Resource } from "@/lib/types";
+import { cn, formatDate, formatDateTime, minutesToLabel, truncate } from "@/lib/utils";
 
 type LmsConnectionInfo = {
   status: string;
@@ -76,6 +77,9 @@ export function LmsView() {
   const [overview, setOverview] = useState<LmsOverview | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
   const [resources, setResources] = useState<Resource[]>([]);
+  const [lmsResources, setLmsResources] = useState<Resource[]>([]);
+  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [watching, setWatching] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connectForm, setConnectForm] = useState({ siteUrl: "", token: "" });
@@ -103,14 +107,24 @@ export function LmsView() {
   const load = useCallback(async () => {
     try {
       setError(null);
-      const [overviewData, courseData, resourceData] = await Promise.all([
+      const [overviewData, courseData, resourceData, chapterData] = await Promise.all([
         apiFetch<LmsOverview>("/api/lms"),
         apiFetch<{ courses: Course[] }>("/api/courses"),
         apiFetch<{ resources: Resource[] }>("/api/resources"),
+        // Chapter titles only label the synced lectures - a failure here must
+        // not break the page, so it degrades to an empty list.
+        apiFetch<{ chapters: Chapter[] }>("/api/chapters").catch(() => ({
+          chapters: [] as Chapter[],
+        })),
       ]);
       setOverview(overviewData);
       setCourses(courseData.courses);
+      setChapters(chapterData.chapters);
       setResources(resourceData.resources.filter((resource) => resource.source === "manual"));
+      // Rows written by the Chrome extension (source "lms") are shown in their
+      // own read-only section below - never in the manual list, which has a
+      // delete control that must not touch LMS-synced data.
+      setLmsResources(resourceData.resources.filter((resource) => resource.source === "lms"));
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -121,6 +135,45 @@ export function LmsView() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const chapterTitleById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const chapter of chapters) map.set(chapter.id, chapter.title);
+    return map;
+  }, [chapters]);
+
+  const lmsLectures = useMemo(
+    () => lmsResources.filter((item) => item.kind === "lecture"),
+    [lmsResources],
+  );
+  const lmsNotes = useMemo(
+    () => lmsResources.filter((item) => item.kind === "note"),
+    [lmsResources],
+  );
+
+  // Two-way "Mark as watched" toggle for a synced lecture. The row is never
+  // deleted; un-toggling only clears watched_at.
+  async function toggleWatched(resource: Resource) {
+    const watched = !resource.watched_at;
+    setWatching(resource.id);
+    try {
+      await apiFetch(`/api/resources/${resource.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ watched }),
+      });
+      setLmsResources((current) =>
+        current.map((item) =>
+          item.id === resource.id
+            ? { ...item, watched_at: watched ? new Date().toISOString() : null }
+            : item,
+        ),
+      );
+    } catch (caught) {
+      toast.error("Could not update the lecture", errorMessage(caught));
+    } finally {
+      setWatching(null);
+    }
+  }
 
   const materials = overview?.materials ?? [];
   const announcements = overview?.announcements ?? [];
@@ -1035,6 +1088,139 @@ export function LmsView() {
         ) : (
           <p className="py-5 text-center text-[0.76rem] text-[#6d747d]">
             Nothing imported manually yet. Paste text or upload a PDF above.
+          </p>
+        )}
+      </section>
+
+      <section className="surface p-4">
+        <SectionHeader
+          title="Synced from LMS"
+          description="Lectures the Cortex LMS Sync extension pulled in from your course page. Read-only — the only control is the watched toggle, and Cortex never edits or deletes synced rows."
+        />
+        {lmsResources.length ? (
+          <>
+            <p className="mb-3 text-[0.66rem] font-semibold uppercase tracking-[0.12em] text-[#6d747d]">
+              {lmsLectures.length} lectures
+              {lmsNotes.length ? ` · ${lmsNotes.length} notes & materials` : ""}
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {lmsLectures.map((resource) => {
+                const watched = Boolean(resource.watched_at);
+                const chapterTitle = resource.lms_module_id
+                  ? chapterTitleById.get(resource.lms_module_id)
+                  : undefined;
+                return (
+                  <article
+                    key={resource.id}
+                    className="flex items-start gap-2.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5"
+                  >
+                    <span
+                      className={cn(
+                        "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg border border-white/10",
+                        watched
+                          ? "bg-[#6ee7b7]/10 text-[#6ee7b7]"
+                          : "bg-white/[0.04] text-[#9aa1aa]",
+                      )}
+                    >
+                      {watched ? <Check className="size-3.5" /> : <BookOpen className="size-3.5" />}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[0.76rem] font-medium text-[#f2f2ef]">
+                        {resource.title}
+                      </p>
+                      <p className="mt-0.5 truncate text-[0.64rem] text-[#6d747d]">
+                        {courseName(resource.course_id)}
+                        {chapterTitle ? ` · ${chapterTitle}` : ""}
+                        {resource.duration_minutes
+                          ? ` · ${minutesToLabel(resource.duration_minutes)}`
+                          : ""}
+                      </p>
+                      <p className="mt-0.5 text-[0.6rem] text-[#6d747d]">
+                        <Clock className="mr-1 inline size-3 -translate-y-px" />
+                        {watched ? "Watched" : "Not watched yet"} · synced{" "}
+                        {formatDate(resource.created_at)}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      {resource.url ? (
+                        <a
+                          href={resource.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn btn-ghost btn-icon p-1.5 text-[#f3c96b]"
+                          aria-label={`Open ${resource.title} in the LMS`}
+                        >
+                          <ExternalLink className="size-3.5" />
+                        </a>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        disabled={watching === resource.id}
+                        onClick={() => void toggleWatched(resource)}
+                      >
+                        {watching === resource.id ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <Check className="size-3" />
+                        )}{" "}
+                        {watched ? "Mark unwatched" : "Mark watched"}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+            {lmsNotes.length ? (
+              <div className="mt-4">
+                <p className="mb-2 text-[0.66rem] font-semibold uppercase tracking-[0.12em] text-[#6d747d]">
+                  Notes &amp; materials from the same pages
+                </p>
+                <div className="space-y-1.5">
+                  {lmsNotes.map((note) => {
+                    const row = (
+                      <>
+                        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-[#8ab4f8]/10 text-[#8ab4f8]">
+                          <FileText className="size-3.5" />
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-[0.74rem] text-[#f2f2ef]">
+                          {note.title}
+                        </span>
+                        {note.lms_module_id && chapterTitleById.get(note.lms_module_id) ? (
+                          <span className="hidden shrink-0 text-[0.62rem] text-[#6d747d] sm:block">
+                            {chapterTitleById.get(note.lms_module_id)}
+                          </span>
+                        ) : null}
+                        {note.url ? (
+                          <ExternalLink className="size-3.5 shrink-0 text-[#f3c96b]" />
+                        ) : null}
+                      </>
+                    );
+                    const className =
+                      "flex items-center gap-2.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-2";
+                    return note.url ? (
+                      <a
+                        key={note.id}
+                        href={note.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={`${className} transition-colors hover:border-[#f3c96b]/40`}
+                      >
+                        {row}
+                      </a>
+                    ) : (
+                      <div key={note.id} className={className}>
+                        {row}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <p className="py-5 text-center text-[0.76rem] text-[#6d747d]">
+            Nothing synced yet. Open your course page in the LMS while the extension is paired.
           </p>
         )}
       </section>

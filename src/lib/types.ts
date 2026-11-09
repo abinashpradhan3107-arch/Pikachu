@@ -124,6 +124,7 @@ export type StudyTask = {
   rescheduled_from: string | null;
   completed_at: string | null;
   sort_order: number;
+  start_time: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -152,6 +153,7 @@ export type Resource = {
   channel: string | null;
   description: string | null;
   lms_module_id: string | null;
+  watched_at: string | null;
   created_at: string;
   updated_at: string;
 };

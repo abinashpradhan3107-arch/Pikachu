@@ -26,6 +26,7 @@ import { QuizRunner } from "@/components/ui/quiz-runner";
 import { EmptyState, LoadingBlock } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { apiFetch, errorMessage, localDateString } from "@/lib/client";
+import { recordQuizAttempt } from "@/lib/quiz-tracking";
 import type { Chapter, Course, QuizQuestion, StudyTask } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -561,7 +562,19 @@ export function ToolsView() {
               </div>
               <div className="px-4 py-4">
                 {result.kind === "quiz" && result.questions ? (
-                  <QuizRunner questions={result.questions} title={result.title} />
+                  <QuizRunner
+                    questions={result.questions}
+                    title={result.title}
+                    onSubmitted={({ score, total }) =>
+                      recordQuizAttempt({
+                        score,
+                        total,
+                        courseId: courseId || null,
+                        chapterId: chapterId || null,
+                        quizTitle: result.title,
+                      })
+                    }
+                  />
                 ) : result.markdown ? (
                   <Markdown>{result.markdown}</Markdown>
                 ) : (

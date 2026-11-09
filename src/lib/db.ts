@@ -179,6 +179,7 @@ function migrate(db: DatabaseSync) {
       rescheduled_from TEXT,
       completed_at TEXT,
       sort_order INTEGER NOT NULL DEFAULT 0,
+      start_time TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -210,6 +211,7 @@ function migrate(db: DatabaseSync) {
       channel TEXT,
       description TEXT,
       lms_module_id TEXT,
+      watched_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -306,6 +308,18 @@ function migrate(db: DatabaseSync) {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS quiz_attempts (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      course_id TEXT REFERENCES courses(id) ON DELETE SET NULL,
+      chapter_id TEXT REFERENCES chapters(id) ON DELETE SET NULL,
+      quiz_title TEXT,
+      score INTEGER NOT NULL DEFAULT 0,
+      total INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user ON quiz_attempts(user_id, created_at);
+
     CREATE TABLE IF NOT EXISTS video_recommendations (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -326,6 +340,19 @@ function migrate(db: DatabaseSync) {
     );
     CREATE INDEX IF NOT EXISTS idx_videos_user ON video_recommendations(user_id, created_at);
   `);
+
+  // CREATE TABLE IF NOT EXISTS only shapes a fresh database. Existing files
+  // (e.g. .data/study-assistant.db) need these columns added explicitly, and
+  // the check makes the upgrade idempotent - nothing is dropped or rewritten.
+  ensureColumn(db, "resources", "watched_at", "TEXT");
+  ensureColumn(db, "study_tasks", "start_time", "TEXT");
+}
+
+function ensureColumn(db: DatabaseSync, table: string, column: string, definition: string) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((existing) => existing.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 export const db = globalForDb.__studyAssistantDb ?? createDb();

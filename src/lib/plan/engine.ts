@@ -1,5 +1,6 @@
 import { queryAll, queryOne, run } from "@/lib/db";
 import { getAcademicContext } from "@/lib/ai/context";
+import { priorityFor } from "@/lib/plan/priority";
 import type { Assignment, Chapter, Course, Exam, Resource, StudyTask } from "@/lib/types";
 import {
   addDaysToDate,
@@ -30,23 +31,40 @@ export type GeneratePlanResult = {
   message?: string;
 };
 
-function priorityFor(score: number): "high" | "medium" | "low" {
-  if (score >= 80) return "high";
-  if (score >= 45) return "medium";
-  return "low";
+/** "18:05" style clock label for a minute offset from midnight. */
+function formatClock(totalMinutes: number): string {
+  const wrapped = ((totalMinutes % 1440) + 1440) % 1440;
+  const hours = Math.floor(wrapped / 60);
+  const minutes = wrapped % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
+
+// Priority classification lives in ./priority (pure, no database) so the
+// browser bundle can reuse the exact same rules without pulling in
+// node:sqlite. Re-exported here so server callers keep one entry point.
+export { chapterPriorityBand } from "./priority";
+export type { ChapterPriority } from "./priority";
 
 function findResource(
   resources: Resource[],
   courseId: string,
+  chapterId?: string | null,
 ): Resource | null {
+  const forCourse = resources.filter(
+    (resource) =>
+      resource.course_id === courseId &&
+      (resource.kind === "video" || resource.kind === "lecture"),
+  );
   return (
-    resources.find(
-      (resource) =>
-        resource.course_id === courseId &&
-        (resource.kind === "video" || resource.kind === "lecture") &&
-        resource.verified === 1,
-    ) ??
+    // Prefer the lecture that actually belongs to this chapter (synced rows
+    // carry lms_module_id), so a task links to THIS week's lecture rather
+    // than an arbitrary one from the same course.
+    (chapterId
+      ? forCourse.find(
+          (resource) => resource.lms_module_id === chapterId && resource.verified === 1,
+        )
+      : undefined) ??
+    forCourse.find((resource) => resource.verified === 1) ??
     resources.find((resource) => resource.course_id === courseId && resource.url) ??
     null
   );
@@ -265,7 +283,10 @@ export function generateDailyPlan(
 
   candidates.sort((a, b) => b.score - a.score || a.chapter.order_index - b.chapter.order_index);
 
-  const pendingAssignments = context.assignments
+  // Assignments with a real deadline come first, soonest first. The ones the
+  // LMS renders without a parseable date are included afterwards instead of
+  // being dropped - hiding a deadlineless assignment would silently lose work.
+  const datedAssignments = context.assignments
     .filter((assignment) => assignment.due_at)
     .map((assignment) => ({
       assignment,
@@ -274,11 +295,36 @@ export function generateDailyPlan(
     .filter((item) => item.days >= 0 && item.days <= 7)
     .sort((a, b) => a.days - b.days);
 
-  const tasksToInsert: Omit<StudyTask, "id" | "created_at" | "updated_at">[] = [];
+  const undatedAssignments = context.assignments
+    .filter((assignment) => !assignment.due_at && assignment.status !== "completed")
+    .map((assignment) => ({ assignment, days: null as number | null }));
+
+  const pendingAssignments = [...datedAssignments, ...undatedAssignments];
+
+  const tasksToInsert: Array<
+    Omit<StudyTask, "id" | "created_at" | "updated_at" | "start_time"> & {
+      start_time?: string | null;
+    }
+  > = [];
   let remaining = available;
   let order = existing.filter((task) => task.status === "completed").length;
 
-  const revisionReserve = available >= 75 ? 15 : 0;
+  // Weak areas (confidence <= 2, or a subject the student flagged as weak)
+  // get a dedicated 20-minute targeted block; otherwise the generic 15-minute
+  // wrap-up is kept. Skipped entirely when today's budget is too small.
+  const weakCandidates = candidates.filter(
+    (candidate) =>
+      candidate.chapter.confidence <= 2 ||
+      candidate.reasons.includes("self-identified weak subject"),
+  );
+  const revisionReserve = weakCandidates.length
+    ? available >= 95
+      ? 20
+      : 0
+    : available >= 75
+      ? 15
+      : 0;
+  const targetedRevision = Boolean(weakCandidates.length && revisionReserve === 20);
   let contentBudget = Math.max(0, remaining - revisionReserve);
 
   const assignmentBudget = Math.min(
@@ -291,6 +337,10 @@ export function generateDailyPlan(
     if (assignmentUsed + 30 > assignmentBudget) break;
     const assignment: Assignment = item.assignment;
     const duration = 30;
+    const dueText =
+      item.days === null
+        ? "The LMS shows no readable deadline for this, so it is scheduled early instead of guessing a date."
+        : `Due in ${item.days} day${item.days === 1 ? "" : "s"}.`;
     tasksToInsert.push({
       user_id: userId,
       course_id: assignment.course_id,
@@ -299,13 +349,13 @@ export function generateDailyPlan(
       assignment_id: assignment.id,
       date,
       title: `Assignment: ${assignment.title}`,
-      description: `Due in ${item.days} day${item.days === 1 ? "" : "s"}. Break the brief into steps and make visible progress.`,
+      description: `${dueText} Before: read the brief and list exactly what is being asked. After: write down what you completed and what is still open.`,
       task_type: "assignment",
       duration_minutes: duration,
-      priority: item.days <= 2 ? "high" : "medium",
+      priority: item.days !== null && item.days <= 2 ? "high" : "medium",
       status: "pending",
       resource_url: assignment.source_url,
-      resource_title: assignment.source === "moodle" ? "Open in LMS" : null,
+      resource_title: assignment.source === "moodle" ? "Open in LMS" : "Open assignment",
       ai_generated: 1,
       rescheduled_from: null,
       completed_at: null,
@@ -323,7 +373,7 @@ export function generateDailyPlan(
       20,
       75,
     );
-    const resource = findResource(resources, candidate.course.id);
+    const resource = findResource(resources, candidate.course.id, candidate.chapter.id);
     const priority = priorityFor(candidate.score);
     const reasonText = candidate.reasons.join(", ");
     const examText = candidate.exam
@@ -345,7 +395,7 @@ export function generateDailyPlan(
       title: `Study ${candidate.chapter.title}`,
       description: `${candidate.course.title} · ${reasonText}.${examText}${
         resource ? ` Suggested resource: ${resource.title}.` : ""
-      }`,
+      } Before: skim what you already know about ${candidate.chapter.title} and write down one question you want answered. After: explain the main idea in two sentences from memory, then note what is still unclear.`,
       task_type: "study",
       duration_minutes: studyMinutes,
       priority,
@@ -386,35 +436,76 @@ export function generateDailyPlan(
   }
 
   if (revisionReserve && remaining >= revisionReserve) {
-    const studied = candidates
-      .filter((candidate) =>
-        tasksToInsert.some((task) => task.chapter_id === candidate.chapter.id),
-      )
-      .slice(0, 4)
-      .map((candidate) => candidate.chapter.title);
-    tasksToInsert.push({
-      user_id: userId,
-      course_id: null,
-      chapter_id: null,
-      exam_id: null,
-      assignment_id: null,
-      date,
-      title: "Active recall + wrap-up",
-      description: studied.length
-        ? `Close the loop on today's material: ${studied.join(" · ")}. Recall key ideas from memory before checking notes.`
-        : "Spend 15 minutes recalling what you studied today without looking at your notes.",
-      task_type: "revision",
-      duration_minutes: revisionReserve,
-      priority: "medium",
-      status: "pending",
-      resource_url: null,
-      resource_title: null,
-      ai_generated: 1,
-      rescheduled_from: null,
-      completed_at: null,
-      sort_order: order++,
-    });
+    if (targetedRevision) {
+      // Requirement: an automatic 20-minute targeted revision session for the
+      // weakest topics, separate from the generic end-of-day recall.
+      const weakTitles = weakCandidates
+        .slice(0, 3)
+        .map((candidate) => candidate.chapter.title);
+      const weakCourse = weakCandidates[0]?.course.title ?? "";
+      tasksToInsert.push({
+        user_id: userId,
+        course_id: weakCandidates[0]?.course.id ?? null,
+        chapter_id: weakCandidates[0]?.chapter.id ?? null,
+        exam_id: weakCandidates[0]?.exam?.id ?? null,
+        assignment_id: null,
+        date,
+        title: `Targeted revision: ${weakTitles.join(" · ")}`,
+        description: `Weak-topic block for ${weakCourse}${
+          weakTitles.length ? ` — ${weakTitles.join(", ")}` : ""
+        }. Confidence is low or you flagged this subject as weak. Before: recall the definition or formula without looking. After: write the one mistake you are most likely to make and how you will avoid it.`,
+        task_type: "revision",
+        duration_minutes: revisionReserve,
+        priority: "high",
+        status: "pending",
+        resource_url: null,
+        resource_title: null,
+        ai_generated: 1,
+        rescheduled_from: null,
+        completed_at: null,
+        sort_order: order++,
+      });
+    } else {
+      const studied = candidates
+        .filter((candidate) =>
+          tasksToInsert.some((task) => task.chapter_id === candidate.chapter.id),
+        )
+        .slice(0, 4)
+        .map((candidate) => candidate.chapter.title);
+      tasksToInsert.push({
+        user_id: userId,
+        course_id: null,
+        chapter_id: null,
+        exam_id: null,
+        assignment_id: null,
+        date,
+        title: "Active recall + wrap-up",
+        description: studied.length
+          ? `Close the loop on today's material: ${studied.join(" · ")}. Recall key ideas from memory before checking notes.`
+          : "Spend 15 minutes recalling what you studied today without looking at your notes.",
+        task_type: "revision",
+        duration_minutes: revisionReserve,
+        priority: "medium",
+        status: "pending",
+        resource_url: null,
+        resource_title: null,
+        ai_generated: 1,
+        rescheduled_from: null,
+        completed_at: null,
+        sort_order: order++,
+      });
+    }
     remaining -= revisionReserve;
+  }
+
+  // Time slots: the day starts at the profile's preferred hour, tasks run
+  // back to back with the configured break between them, in task order.
+  const startHour = clamp(Math.round(context.profile.preferred_start_hour ?? 18), 0, 23);
+  const breakMinutes = clamp(Math.round(context.profile.break_minutes ?? 10), 0, 60);
+  let cursorMinutes = startHour * 60;
+  for (const task of tasksToInsert) {
+    task.start_time = formatClock(cursorMinutes);
+    cursorMinutes += task.duration_minutes + breakMinutes;
   }
 
   if (!tasksToInsert.length) {
@@ -435,8 +526,8 @@ export function generateDailyPlan(
   const insert = `INSERT INTO study_tasks
     (id, user_id, course_id, chapter_id, exam_id, assignment_id, date, title, description,
      task_type, duration_minutes, priority, status, resource_url, resource_title, ai_generated,
-     rescheduled_from, completed_at, sort_order, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+     rescheduled_from, completed_at, sort_order, start_time, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
   for (const task of tasksToInsert) {
     run(insert, [
@@ -459,6 +550,7 @@ export function generateDailyPlan(
       task.rescheduled_from,
       task.completed_at,
       task.sort_order,
+      task.start_time ?? null,
       now,
       now,
     ]);
@@ -487,7 +579,7 @@ export function generateDailyPlan(
     pendingAssignments.length
       ? `You also have ${pendingAssignments.length} assignment${
           pendingAssignments.length === 1 ? "" : "s"
-        } due within 7 days.`
+        } queued${datedAssignments.length ? `, ${datedAssignments.length} due within 7 days` : ""}.`
       : "",
     rescheduled
       ? `${rescheduled} missed task${rescheduled === 1 ? "" : "s"} rescheduled automatically.`

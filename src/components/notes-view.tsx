@@ -21,6 +21,7 @@ import { QuizRunner } from "@/components/ui/quiz-runner";
 import { EmptyState, LoadingBlock } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { apiFetch, errorMessage } from "@/lib/client";
+import { recordQuizAttempt } from "@/lib/quiz-tracking";
 import type { Course, Note, Quiz, QuizQuestion } from "@/lib/types";
 import { cn, formatDateTime, safeJsonParse, truncate } from "@/lib/utils";
 
@@ -444,7 +445,19 @@ export function NotesView() {
         description={activeQuiz ? `${courseName(activeQuiz.course_id)} · ${activeQuizQuestions.length} questions` : undefined}
         size="xl"
       >
-        {activeQuiz ? <QuizRunner questions={activeQuizQuestions} /> : null}
+        {activeQuiz ? (
+          <QuizRunner
+            questions={activeQuizQuestions}
+            onSubmitted={({ score, total }) =>
+              recordQuizAttempt({
+                score,
+                total,
+                courseId: activeQuiz.course_id,
+                quizTitle: activeQuiz.title,
+              })
+            }
+          />
+        ) : null}
       </Modal>
 
       <Modal

@@ -66,6 +66,30 @@ export function normalizeDueAt(value: string | null | undefined): string | null 
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+/**
+ * "6:00 PM – 7:30 PM" for a task that has a planned start_time ("18:00") and
+ * a duration. Returns null when no start time was planned (e.g. a task the
+ * student added by hand) so the UI hides the slot instead of inventing one.
+ */
+export function timeWindowLabel(
+  startTime: string | null | undefined,
+  durationMinutes: number,
+): string | null {
+  if (!startTime) return null;
+  const match = /^(\d{1,2}):(\d{2})$/.exec(startTime);
+  if (!match) return null;
+  const start = Number(match[1]) * 60 + Number(match[2]);
+  const clock = (totalMinutes: number) => {
+    const wrapped = ((totalMinutes % 1440) + 1440) % 1440;
+    const hours = Math.floor(wrapped / 60);
+    const minutes = wrapped % 60;
+    const suffix = hours >= 12 ? "PM" : "AM";
+    const hours12 = hours % 12 === 0 ? 12 : hours % 12;
+    return `${hours12}:${String(minutes).padStart(2, "0")} ${suffix}`;
+  };
+  return `${clock(start)} – ${clock(start + durationMinutes)}`;
+}
+
 export function formatDate(
   value: string | null | undefined,
   timeZone = "Asia/Kolkata",

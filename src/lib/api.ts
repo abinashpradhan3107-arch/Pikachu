@@ -34,18 +34,30 @@ export async function readJson<T = unknown>(request: Request): Promise<T> {
   }
 }
 
-export async function requireApiUser(request?: Request): Promise<AuthContext> {
+export async function requireApiUser(
+  request?: Request,
+  options: { allowExtensionOrigin?: boolean } = {},
+): Promise<AuthContext> {
   if (request && isMutating(request.method)) {
-    assertSameOrigin(request);
+    assertSameOrigin(request, options);
   }
   const context = await getAuthContext();
   if (!context) throw new ApiError(401, "Please sign in to continue.");
   return context;
 }
 
-export function assertSameOrigin(request: Request) {
+export function assertSameOrigin(
+  request: Request,
+  options: { allowExtensionOrigin?: boolean } = {},
+) {
   const origin = request.headers.get("origin");
   if (!origin) return;
+  // The LMS extension calls this API from its background service worker, so
+  // Origin is "chrome-extension://<id>" while Host is "localhost:3000" - a
+  // legitimate mismatch. Routes must opt in (only /api/lms/extension-sync
+  // does), the session cookie still decides who the user is, and every other
+  // endpoint keeps the strict same-host rule below.
+  if (options.allowExtensionOrigin && isExtensionOrigin(origin)) return;
   const host = request.headers.get("host");
   try {
     const originUrl = new URL(origin);
@@ -56,6 +68,11 @@ export function assertSameOrigin(request: Request) {
     if (error instanceof ApiError) throw error;
     throw new ApiError(403, "Invalid request origin.");
   }
+}
+
+/** True for a well-formed chrome-extension:// origin (32 chars of a-p). */
+function isExtensionOrigin(origin: string): boolean {
+  return /^chrome-extension:\/\/[a-p]{32}\/?$/.test(origin);
 }
 
 function isMutating(method: string) {

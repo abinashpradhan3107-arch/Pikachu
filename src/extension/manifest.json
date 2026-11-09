@@ -6,19 +6,25 @@
   "permissions": [
     "activeTab",
     "storage",
-    "webNavigation",
-    "scripting",
-    "debugging",
-    "tabs"
+    "webNavigation"
   ],
   "host_permissions": [
-    "https://iitj-learn.masaischool.com/*"
+    "https://iitj-learn.masaischool.com/*",
+    "https://moodle.iitj.ac.in/*",
+    "http://localhost:3000/*",
+    "http://localhost:3001/*"
   ],
+  "action": {
+    "default_title": "Cortex LMS Sync",
+    "default_popup": "popup.html"
+  },
   "content_scripts": [
     {
-      "matches": ["https://iitj-learn.masaischool.com/*"],
+      "matches": [
+        "https://iitj-learn.masaischool.com/*",
+        "https://moodle.iitj.ac.in/*"
+      ],
       "js": ["content.js"],
-      "css": ["content.css"],
       "run_at": "document_idle"
     }
   ],
@@ -27,13 +33,11 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["*.js", "*.css"],
-      "matches": ["<all_urls>"]
+      "resources": ["content.js"],
+      "matches": [
+        "https://iitj-learn.masaischool.com/*",
+        "https://moodle.iitj.ac.in/*"
+      ]
     }
-  ],
-  "icons": {
-    "16": "icon16.png",
-    "48": "icon48.png",
-    "128": "icon128.png"
-  }
+  ]
 }

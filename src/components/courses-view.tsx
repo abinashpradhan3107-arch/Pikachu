@@ -3,16 +3,22 @@
 import {
   AlertTriangle,
   BookOpen,
+  Check,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
+  FileText,
   GraduationCap,
   Layers,
   Loader2,
   Pencil,
+  PlayCircle,
   Plus,
   RefreshCw,
+  Target,
   Trash2,
 } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConfirmDialog, Modal } from "@/components/ui/modal";
 import { PageHeader, SectionHeader } from "@/components/ui/page";
@@ -20,8 +26,9 @@ import { ProgressBar } from "@/components/ui/progress";
 import { EmptyState, LoadingBlock } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { apiFetch, errorMessage } from "@/lib/client";
-import type { Chapter, Course } from "@/lib/types";
-import { COURSE_COLORS, cn, pct, statusLabel } from "@/lib/utils";
+import { chapterPriorityBand } from "@/lib/plan/priority";
+import type { Chapter, Course, Exam, Resource } from "@/lib/types";
+import { COURSE_COLORS, cn, daysBetween, minutesToLabel, pct, statusLabel } from "@/lib/utils";
 
 type CourseForm = {
   code: string;
@@ -73,12 +80,28 @@ const DIFFICULTY_STYLES: Record<string, string> = {
   easy: "badge-green",
 };
 
-export function CoursesView() {
+type MatrixEntry = {
+  chapter: Chapter;
+  course: Course | null;
+  score: number;
+  reasons: string[];
+};
+
+export function CoursesView({
+  today,
+  weakSubjects,
+}: {
+  today: string;
+  weakSubjects: string[];
+}) {
   const toast = useToast();
   const [courses, setCourses] = useState<Course[]>([]);
   const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [resources, setResources] = useState<Resource[]>([]);
+  const [exams, setExams] = useState<Exam[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [watching, setWatching] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [courseModal, setCourseModal] = useState(false);
   const [editingCourse, setEditingCourse] = useState<Course | null>(null);
@@ -95,12 +118,20 @@ export function CoursesView() {
   const load = useCallback(async () => {
     try {
       setError(null);
-      const [courseData, chapterData] = await Promise.all([
+      const [courseData, chapterData, resourceData, examData] = await Promise.all([
         apiFetch<{ courses: Course[] }>("/api/courses"),
         apiFetch<{ chapters: Chapter[] }>("/api/chapters"),
+        // Additive LMS and exam data: if either call fails the courses must
+        // still render, so they degrade to empty lists instead of erroring.
+        apiFetch<{ resources: Resource[] }>("/api/resources").catch(() => ({
+          resources: [] as Resource[],
+        })),
+        apiFetch<{ exams: Exam[] }>("/api/exams").catch(() => ({ exams: [] as Exam[] })),
       ]);
       setCourses(courseData.courses);
       setChapters(chapterData.chapters);
+      setResources(resourceData.resources);
+      setExams(examData.exams);
       setExpanded((current) => {
         if (current.size) return current;
         return new Set(courseData.courses.slice(0, 2).map((course) => course.id));
@@ -125,6 +156,79 @@ export function CoursesView() {
     }
     return map;
   }, [chapters]);
+
+  const courseById = useMemo(() => {
+    const map = new Map<string, Course>();
+    for (const course of courses) map.set(course.id, course);
+    return map;
+  }, [courses]);
+
+  // Synced-from-LMS material only. Manual resources are untouched here.
+  const lmsLectures = useMemo(
+    () => resources.filter((item) => item.source === "lms" && item.kind === "lecture"),
+    [resources],
+  );
+  const lmsNotes = useMemo(
+    () => resources.filter((item) => item.source === "lms" && item.kind === "note"),
+    [resources],
+  );
+  // Catch-up backlog: lectures the extension synced but never marked watched.
+  const backlog = useMemo(() => lmsLectures.filter((item) => !item.watched_at), [lmsLectures]);
+
+  // Nearest upcoming exam per course - drives both the countdown and the
+  // exam-proximity boost in the priority matrix.
+  const examByCourse = useMemo(() => {
+    const map = new Map<string, { exam: Exam; days: number }>();
+    for (const exam of exams) {
+      if (!exam.course_id) continue;
+      const days = daysBetween(today, exam.exam_date.slice(0, 10));
+      if (days < 0) continue;
+      const existing = map.get(exam.course_id);
+      if (!existing || days < existing.days) map.set(exam.course_id, { exam, days });
+    }
+    return map;
+  }, [exams, today]);
+
+  const nearestExam = useMemo(() => {
+    let best: { exam: Exam; days: number } | null = null;
+    for (const entry of examByCourse.values()) {
+      if (!best || entry.days < best.days) best = entry;
+    }
+    return best;
+  }, [examByCourse]);
+
+  // High / Medium / Low matrix computed with the SAME function the planning
+  // engine uses (src/lib/plan/priority.ts), so what is shown is what is
+  // scheduled - not a second copy of the rules.
+  const priorityMatrix = useMemo(() => {
+    const bands: Record<"high" | "medium" | "low", MatrixEntry[]> = {
+      high: [],
+      medium: [],
+      low: [],
+    };
+    for (const chapter of chapters) {
+      const course = courseById.get(chapter.course_id) ?? null;
+      const nearest = examByCourse.get(chapter.course_id);
+      const weak = weakSubjects.some((subject) => {
+        const needle = subject.trim().toLowerCase();
+        if (!needle) return false;
+        return (
+          chapter.title.toLowerCase().includes(needle) ||
+          (course?.title ?? "").toLowerCase().includes(needle)
+        );
+      });
+      const result = chapterPriorityBand({
+        chapter,
+        daysToExam: nearest ? nearest.days : null,
+        isWeakSubject: weak,
+      });
+      bands[result.band].push({ chapter, course, score: result.score, reasons: result.reasons });
+    }
+    for (const band of ["high", "medium", "low"] as const) {
+      bands[band].sort((a, b) => b.score - a.score);
+    }
+    return bands;
+  }, [chapters, courseById, examByCourse, weakSubjects]);
 
   function openCreateCourse() {
     setEditingCourse(null);
@@ -278,6 +382,30 @@ export function CoursesView() {
     }
   }
 
+  // Two-way "Mark as watched" toggle on a synced lecture. The row itself is
+  // never deleted - un-toggling only clears watched_at.
+  async function toggleWatched(resource: Resource) {
+    const watched = !resource.watched_at;
+    setWatching(resource.id);
+    try {
+      await apiFetch(`/api/resources/${resource.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ watched }),
+      });
+      setResources((current) =>
+        current.map((item) =>
+          item.id === resource.id
+            ? { ...item, watched_at: watched ? new Date().toISOString() : null }
+            : item,
+        ),
+      );
+    } catch (caught) {
+      toast.error("Could not update the lecture", errorMessage(caught));
+    } finally {
+      setWatching(null);
+    }
+  }
+
   function toggleCourse(id: string) {
     setExpanded((current) => {
       const next = new Set(current);
@@ -328,6 +456,43 @@ export function CoursesView() {
         }
       />
 
+      {lmsLectures.length ? (
+        <section className="surface p-4">
+          <SectionHeader
+            title="Catch-up backlog"
+            description={`${backlog.length} of ${lmsLectures.length} synced LMS lectures not marked as watched yet`}
+            action={
+              <Link href="/lms" className="text-[0.7rem] font-medium text-[#f3c96b] hover:underline">
+                Synced from LMS
+              </Link>
+            }
+          />
+          {backlog.length ? (
+            <div className="space-y-1.5">
+              {backlog.slice(0, 6).map((lecture) => (
+                <LmsResourceRow
+                  key={lecture.id}
+                  resource={lecture}
+                  busy={watching === lecture.id}
+                  onToggle={toggleWatched}
+                />
+              ))}
+              {backlog.length > 6 ? (
+                <p className="pt-0.5 text-[0.64rem] text-[#6d747d]">
+                  +{backlog.length - 6} more unwatched lecture{backlog.length - 6 === 1 ? "" : "s"} —
+                  open a course below to see all of them.
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <p className="py-3 text-center text-[0.74rem] text-[#6d747d]">
+              Nothing waiting. Every synced lecture is marked watched — new ones appear here
+              automatically as the extension syncs them.
+            </p>
+          )}
+        </section>
+      ) : null}
+
       {!courses.length ? (
         <EmptyState
           icon={BookOpen}
@@ -346,6 +511,12 @@ export function CoursesView() {
             const completed = courseChapters.filter((chapter) => chapter.status === "completed").length;
             const progress = pct(completed, courseChapters.length);
             const isOpen = expanded.has(course.id);
+            const courseLectures = lmsLectures.filter((item) => item.course_id === course.id);
+            const courseNotes = lmsNotes.filter((item) => item.course_id === course.id);
+            const chapterIds = new Set(courseChapters.map((chapter) => chapter.id));
+            const unassigned = [...courseLectures, ...courseNotes].filter(
+              (item) => !item.lms_module_id || !chapterIds.has(item.lms_module_id),
+            );
             return (
               <section key={course.id} className="surface overflow-hidden">
                 <div className="h-1 w-full" style={{ background: course.color ?? "var(--accent)" }} />
@@ -512,6 +683,62 @@ export function CoursesView() {
                         No chapters yet. Add the units you are actually covering.
                       </p>
                     )}
+
+                    {courseLectures.length || courseNotes.length ? (
+                      <div className="mt-3 border-t border-white/[0.06] pt-2.5">
+                        <div className="mb-1.5 flex items-center justify-between gap-2">
+                          <p className="text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-[#6d747d]">
+                            {"LMS Lectures & Resources"}
+                          </p>
+                          <span className="shrink-0 text-[0.6rem] text-[#6d747d]">
+                            {courseLectures.filter((item) => !item.watched_at).length} unwatched
+                          </span>
+                        </div>
+                        <div className="space-y-2">
+                          {courseChapters.map((chapter) => {
+                            const items = [
+                              ...courseLectures.filter((item) => item.lms_module_id === chapter.id),
+                              ...courseNotes.filter((item) => item.lms_module_id === chapter.id),
+                            ];
+                            if (!items.length) return null;
+                            return (
+                              <div key={chapter.id}>
+                                <p className="mb-1 truncate text-[0.6rem] font-medium text-[#9aa1aa]">
+                                  {chapter.title}
+                                </p>
+                                <div className="space-y-1.5">
+                                  {items.map((item) => (
+                                    <LmsResourceRow
+                                      key={item.id}
+                                      resource={item}
+                                      busy={watching === item.id}
+                                      onToggle={toggleWatched}
+                                    />
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {unassigned.length ? (
+                            <div>
+                              <p className="mb-1 text-[0.6rem] font-medium text-[#9aa1aa]">
+                                Not linked to a chapter yet
+                              </p>
+                              <div className="space-y-1.5">
+                                {unassigned.map((item) => (
+                                  <LmsResourceRow
+                                    key={item.id}
+                                    resource={item}
+                                    busy={watching === item.id}
+                                    onToggle={toggleWatched}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
               </section>
@@ -519,6 +746,71 @@ export function CoursesView() {
           })}
         </div>
       )}
+
+      {chapters.length ? (
+        <section className="surface p-4">
+          <SectionHeader
+            title="Topic priority matrix"
+            description={
+              nearestExam
+                ? `Classified for ${nearestExam.exam.title} in ${nearestExam.days} day${
+                    nearestExam.days === 1 ? "" : "s"
+                  } — the exact ranking your daily plan schedules by.`
+                : "The exact High / Medium / Low ranking your daily plan schedules by."
+            }
+            action={
+              <Link href="/exams" className="text-[0.7rem] font-medium text-[#f3c96b] hover:underline">
+                Exams
+              </Link>
+            }
+          />
+          <div className="grid gap-3 sm:grid-cols-3">
+            {(
+              [
+                ["high", "High priority", "badge-red"],
+                ["medium", "Medium priority", "badge-accent"],
+                ["low", "Low priority", "badge-green"],
+              ] as const
+            ).map(([band, label, badgeClass]) => (
+              <div key={band} className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="flex items-center gap-1.5 text-[0.7rem] font-semibold text-[#f2f2ef]">
+                    {band === "high" ? <Target className="size-3.5 text-[#f08a8a]" /> : null}
+                    {label}
+                  </p>
+                  <span className={cn("badge px-1.5 py-0.5 text-[0.56rem]", badgeClass)}>
+                    {priorityMatrix[band].length}
+                  </span>
+                </div>
+                {priorityMatrix[band].length ? (
+                  <ul className="space-y-1.5">
+                    {priorityMatrix[band].slice(0, 6).map(({ chapter, course, reasons }) => (
+                      <li
+                        key={chapter.id}
+                        className="rounded-md border border-white/[0.05] bg-black/20 px-2 py-1.5"
+                      >
+                        <p className="truncate text-[0.72rem] font-medium text-[#f2f2ef]">
+                          {chapter.title}
+                        </p>
+                        <p className="mt-0.5 truncate text-[0.6rem] text-[#6d747d]">
+                          {course?.code || course?.title || "—"} · {reasons.slice(0, 2).join(", ")}
+                        </p>
+                      </li>
+                    ))}
+                    {priorityMatrix[band].length > 6 ? (
+                      <li className="text-[0.62rem] text-[#6d747d]">
+                        +{priorityMatrix[band].length - 6} more
+                      </li>
+                    ) : null}
+                  </ul>
+                ) : (
+                  <p className="py-2 text-[0.66rem] text-[#6d747d]">Nothing in this band.</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="surface p-4">
         <SectionHeader
@@ -771,6 +1063,87 @@ export function CoursesView() {
         confirmLabel="Delete chapter"
         busy={deleting}
       />
+    </div>
+  );
+}
+
+/**
+ * One synced LMS row: lecture or attached note/slide. Read-only except the
+ * "Mark as watched" toggle - nothing here can edit or delete synced data.
+ */
+function LmsResourceRow({
+  resource,
+  busy,
+  onToggle,
+}: {
+  resource: Resource;
+  busy: boolean;
+  onToggle: (resource: Resource) => void;
+}) {
+  const isLecture = resource.kind === "lecture";
+  const watched = Boolean(resource.watched_at);
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-white/[0.05] bg-white/[0.02] px-2.5 py-2">
+      <span
+        className={cn(
+          "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md",
+          !isLecture
+            ? "bg-[#8ab4f8]/10 text-[#8ab4f8]"
+            : watched
+              ? "bg-[#6ee7b7]/10 text-[#6ee7b7]"
+              : "bg-[#e7b44b]/10 text-[#e7b44b]",
+        )}
+      >
+        {!isLecture ? (
+          <FileText className="size-3.5" />
+        ) : watched ? (
+          <Check className="size-3.5" />
+        ) : (
+          <PlayCircle className="size-3.5" />
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p
+          className={cn(
+            "text-[0.74rem] font-medium text-[#f2f2ef]",
+            isLecture && watched && "opacity-70",
+          )}
+        >
+          {resource.title}
+        </p>
+        <p className="mt-0.5 text-[0.62rem] text-[#6d747d]">
+          {resource.duration_minutes ? `${minutesToLabel(resource.duration_minutes)} · ` : ""}
+          {!isLecture
+            ? "Notes & material"
+            : watched
+              ? "Watched"
+              : "Not watched yet"}
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {resource.url ? (
+          <a
+            href={resource.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn btn-ghost btn-icon p-1.5 text-[#f3c96b]"
+            aria-label={`Open ${resource.title} in the LMS`}
+          >
+            <ExternalLink className="size-3.5" />
+          </a>
+        ) : null}
+        {isLecture ? (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={busy}
+            onClick={() => onToggle(resource)}
+          >
+            {busy ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />}{" "}
+            {watched ? "Mark unwatched" : "Mark watched"}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }

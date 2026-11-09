@@ -32,6 +32,15 @@ type DashboardData = {
   stats: StudyStats;
   profile: Profile;
   plan: { summary: string | null; ai_briefing: string | null; total_minutes: number } | null;
+  quizAccuracy?: Array<{
+    chapter_id: string;
+    chapter_title: string | null;
+    course_title: string | null;
+    score: number;
+    total: number;
+    attempts: number;
+    accuracy: number | null;
+  }>;
   ai: { configured: boolean; source: string; model: string; hasYoutubeKey: boolean };
   lms: { connected: boolean };
 };
@@ -181,10 +190,21 @@ export function ProgressView() {
     );
   }
 
-  const { stats } = data;
+  const { stats, quizAccuracy } = data;
   const weeks = buildWeeks(stats.heatmap);
   const maxWeekly = Math.max(60, ...stats.weekly.map((day) => Math.max(day.minutes, day.planned)));
   const upcomingExams = stats.exams.slice(0, 5);
+  // Measured weakness: chapters scored under 60% across submitted quizzes,
+  // excluding ones already surfaced from confidence/difficulty.
+  const lowAccuracy = (quizAccuracy ?? []).filter(
+    (row) =>
+      row.accuracy !== null &&
+      row.accuracy < 60 &&
+      !stats.weakTopics.some((chapter) => chapter.id === row.chapter_id),
+  );
+  const accuracyByChapter = new Map(
+    (quizAccuracy ?? []).map((row) => [row.chapter_id, row] as const),
+  );
 
   return (
     <div className="space-y-5">
@@ -432,36 +452,69 @@ export function ProgressView() {
 
         <div className="space-y-4">
           <section className="surface p-4">
-            <SectionHeader title="Weak topics" description="Low confidence or hard and untouched" />
-            {stats.weakTopics.length ? (
+            <SectionHeader
+              title="Weak topics"
+              description="Low confidence, hard and untouched, or under 60% quiz accuracy"
+            />
+            {stats.weakTopics.length || lowAccuracy.length ? (
               <div className="space-y-2.5">
-                {stats.weakTopics.map((chapter) => (
-                  <div key={chapter.id} className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
+                {stats.weakTopics.map((chapter) => {
+                  const measured = accuracyByChapter.get(chapter.id);
+                  return (
+                    <div key={chapter.id} className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="min-w-0 flex-1 text-[0.78rem] font-medium leading-snug text-[#f2f2ef]">
+                          {chapter.title}
+                        </p>
+                        <span className="badge shrink-0 px-1.5 py-0.5 text-[0.56rem]">{chapter.difficulty}</span>
+                      </div>
+                      <p className="mt-0.5 text-[0.64rem] text-[#6d747d]">
+                        {chapter.course_code ? `${chapter.course_code} · ` : ""}
+                        {chapter.course_title}
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span className="text-[0.62rem] text-[#6d747d]">Confidence</span>
+                        <div className="flex gap-1">
+                          {Array.from({ length: 5 }).map((_, index) => (
+                            <span
+                              key={index}
+                              className={cn(
+                                "size-1.5 rounded-full",
+                                index < chapter.confidence ? "bg-[#f08a8a]" : "bg-white/[0.1]",
+                              )}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-[0.62rem] text-[#9aa1aa]">{chapter.confidence}/5</span>
+                        {measured && measured.accuracy !== null ? (
+                          <span
+                            className={cn(
+                              "badge px-1.5 py-0.5 text-[0.56rem]",
+                              measured.accuracy < 60 ? "badge-red" : "badge-accent",
+                            )}
+                          >
+                            quiz {measured.accuracy}%
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+                {lowAccuracy.map((row) => (
+                  <div key={row.chapter_id} className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
                     <div className="flex items-start justify-between gap-2">
                       <p className="min-w-0 flex-1 text-[0.78rem] font-medium leading-snug text-[#f2f2ef]">
-                        {chapter.title}
+                        {row.chapter_title ?? "Unknown chapter"}
                       </p>
-                      <span className="badge shrink-0 px-1.5 py-0.5 text-[0.56rem]">{chapter.difficulty}</span>
+                      <span className="badge badge-red shrink-0 px-1.5 py-0.5 text-[0.56rem]">
+                        {row.accuracy}%
+                      </span>
                     </div>
                     <p className="mt-0.5 text-[0.64rem] text-[#6d747d]">
-                      {chapter.course_code ? `${chapter.course_code} · ` : ""}
-                      {chapter.course_title}
+                      {row.course_title ? `${row.course_title} · ` : ""}
+                      quiz accuracy {row.accuracy}% over {row.attempts} attempt
+                      {row.attempts === 1 ? "" : "s"}
                     </p>
-                    <div className="mt-2 flex items-center gap-2">
-                      <span className="text-[0.62rem] text-[#6d747d]">Confidence</span>
-                      <div className="flex gap-1">
-                        {Array.from({ length: 5 }).map((_, index) => (
-                          <span
-                            key={index}
-                            className={cn(
-                              "size-1.5 rounded-full",
-                              index < chapter.confidence ? "bg-[#f08a8a]" : "bg-white/[0.1]",
-                            )}
-                          />
-                        ))}
-                      </div>
-                      <span className="text-[0.62rem] text-[#9aa1aa]">{chapter.confidence}/5</span>
-                    </div>
                   </div>
                 ))}
                 <Link

@@ -10,7 +10,7 @@ export async function GET(request: Request) {
     const resources = courseId
       ? queryAll<Resource>(
           `SELECT id, user_id, course_id, title, kind, url, source, verified, duration_minutes,
-             channel, description, lms_module_id, created_at, updated_at,
+             channel, description, lms_module_id, watched_at, created_at, updated_at,
              substr(COALESCE(content, ''), 1, 240) AS content
            FROM resources WHERE user_id = ? AND course_id = ?
            ORDER BY created_at DESC LIMIT 200`,
@@ -18,7 +18,7 @@ export async function GET(request: Request) {
         )
       : queryAll<Resource>(
           `SELECT id, user_id, course_id, title, kind, url, source, verified, duration_minutes,
-             channel, description, lms_module_id, created_at, updated_at,
+             channel, description, lms_module_id, watched_at, created_at, updated_at,
              substr(COALESCE(content, ''), 1, 240) AS content
            FROM resources WHERE user_id = ?
            ORDER BY created_at DESC LIMIT 200`,

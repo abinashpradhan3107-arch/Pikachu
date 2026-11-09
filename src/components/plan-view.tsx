@@ -31,6 +31,7 @@ import {
   formatDate,
   minutesToLabel,
   relativeDay,
+  timeWindowLabel,
 } from "@/lib/utils";
 
 type PlanProfile = {
@@ -528,6 +529,7 @@ export function PlanView({
                   {selectedTasks.map((task) => {
                     const course = courses.find((item) => item.id === task.course_id);
                     const done = task.status === "completed";
+                    const slot = timeWindowLabel(task.start_time, task.duration_minutes);
                     return (
                       <div
                         key={task.id}
@@ -567,8 +569,17 @@ export function PlanView({
                             {task.ai_generated ? <span className="badge px-1.5 py-0.5 text-[0.56rem]">AI</span> : null}
                           </div>
                           <p className="mt-0.5 text-[0.64rem] text-[#6d747d]">
+                            {slot ? (
+                              <span className="mr-1 inline-flex items-center gap-1 font-medium text-[#f3c96b]">
+                                <Clock className="size-3" />
+                                {slot}
+                              </span>
+                            ) : null}
                             {course ? `${course.title} · ` : ""}
                             {minutesToLabel(task.duration_minutes)} · {task.task_type}
+                            {task.rescheduled_from
+                              ? ` · moved from ${formatDate(task.rescheduled_from)}`
+                              : ""}
                           </p>
                           {task.description ? (
                             <p className="mt-1 text-[0.68rem] leading-relaxed text-[#9aa1aa]">{task.description}</p>
