@@ -1,5 +1,5 @@
 import { requireApiUser, handleRoute, json, readJson, ApiError } from '@/lib/api';
-import { run, queryOne } from '@/lib/db';
+import { run, queryOne, queryAll } from '@/lib/db';
 import { nowIso } from '@/lib/utils';
 import { z } from 'zod';
 
@@ -21,6 +21,10 @@ const extensionCourseDataSchema = z.object({
     chapterId: z.string().optional(),
     duration: z.string().optional(),
     url: z.string().optional(),
+    // Automated watched state observed by the extension: a completion
+    // indicator on the lecture card, or video playback past 85%.
+    completed: z.boolean().optional(),
+    watched: z.boolean().optional(),
     // Note/slide/PDF links found next to the lecture card on the LMS page.
     notes: z.array(z.object({
       title: z.string(),
@@ -50,6 +54,8 @@ interface ExtensionCourseData {
     chapterId?: string;
     duration?: string;
     url?: string;
+    completed?: boolean;
+    watched?: boolean;
     notes?: Array<{ title: string; url: string }>;
   }>;
   assignments?: Array<{ id: string; title: string; dueDate?: string; status?: string }>;
@@ -216,20 +222,35 @@ export async function POST(request: Request) {
     // Lectures -> resources (duplicate prevention by id + user + course)
     // ============================================================
 
+    // Lectures this sync marked watched for the first time - used below to
+    // auto-complete the study tasks that were scheduled from them.
+    const watchedLectures: Array<{ title: string; url: string | null; chapterId: string | null }> = [];
+
     for (const lecture of courseData.lectures || []) {
-      const existingLecture = await queryOne<{ url: string | null; duration_minutes: number | null }>(
-        `SELECT url, duration_minutes FROM resources
+      const existingLecture = await queryOne<{
+        url: string | null;
+        duration_minutes: number | null;
+        watched_at: string | null;
+      }>(
+        `SELECT url, duration_minutes, watched_at FROM resources
          WHERE id = ? AND user_id = ? AND course_id = ? AND kind = 'lecture'`,
         [lecture.id, authenticatedUserId, courseData.courseId]
       );
       const lectureUrl = lecture.url || null;
       const lectureMinutes = parseDurationMinutes(lecture.duration);
+      // Automated "Mark as Watched": the extension only sends completed=true
+      // when it observed a completion indicator or the video passed 85%.
+      const completed = lecture.completed === true || lecture.watched === true;
+      // Set only when completed AND not already watched: an existing
+      // watched_at is never overwritten, so a later sync (or completed:false)
+      // can never un-watch a lecture.
+      const watchedAt = completed && !existingLecture?.watched_at ? now : null;
 
       if (!existingLecture) {
         await run(
           `INSERT INTO resources
-             (id, user_id, course_id, title, kind, url, source, verified, duration_minutes, lms_module_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'lecture', ?, 'lms', 1, ?, ?, ?, ?)`,
+             (id, user_id, course_id, title, kind, url, source, verified, duration_minutes, lms_module_id, watched_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'lecture', ?, 'lms', 1, ?, ?, ?, ?, ?)`,
           [
             lecture.id,
             authenticatedUserId,
@@ -238,6 +259,7 @@ export async function POST(request: Request) {
             lectureUrl,
             lectureMinutes,
             lecture.chapterId || null,
+            watchedAt,
             now,
             now,
           ]
@@ -258,6 +280,22 @@ export async function POST(request: Request) {
             [lectureMinutes, now, lecture.id, authenticatedUserId]
           );
         }
+        // First time seen as completed: stamp watched_at. The WHERE guard
+        // makes this a no-op if a manual toggle already set it.
+        if (watchedAt) {
+          await run(
+            `UPDATE resources SET watched_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND watched_at IS NULL`,
+            [now, now, lecture.id, authenticatedUserId]
+          );
+        }
+      }
+
+      if (watchedAt) {
+        watchedLectures.push({
+          title: lecture.title,
+          url: lectureUrl,
+          chapterId: lecture.chapterId || null,
+        });
       }
 
       // Notes, slides and PDFs linked from the same lecture card.
@@ -283,6 +321,52 @@ export async function POST(request: Request) {
             now,
             now,
           ]
+        );
+      }
+    }
+
+    // ============================================================
+    // Automated "Mark as Watched" -> related study tasks
+    //
+    // Only tasks the planner created FROM a lecture (task_type 'study') are
+    // touched, and only while they are still pending. Practice, revision and
+    // assignment tasks are never completed by this path.
+    // ============================================================
+
+    for (const watched of watchedLectures) {
+      // Exact link match: tasks planned from this lecture carry its URL.
+      if (watched.url) {
+        await run(
+          `UPDATE study_tasks SET status = 'completed', completed_at = ?, updated_at = ?
+           WHERE user_id = ? AND status = 'pending' AND task_type = 'study' AND resource_url = ?`,
+          [now, now, authenticatedUserId, watched.url]
+        );
+      }
+      // Tasks planned before the extension could capture lecture links carry
+      // the lecture title instead of a URL - matched exactly, within the course.
+      await run(
+        `UPDATE study_tasks SET status = 'completed', completed_at = ?, updated_at = ?
+         WHERE user_id = ? AND status = 'pending' AND task_type = 'study' AND resource_title = ?
+           AND (resource_url IS NULL OR resource_url = '') AND course_id = ?`,
+        [now, now, authenticatedUserId, watched.title, courseData.courseId]
+      );
+    }
+
+    // A chapter's tasks are only auto-completed once EVERY lecture in that
+    // chapter is watched - watching one lecture never completes the chapter.
+    if (watchedLectures.length > 0) {
+      const fullyWatchedChapters = queryAll<{ id: string }>(
+        `SELECT lms_module_id AS id FROM resources
+          WHERE user_id = ? AND course_id = ? AND kind = 'lecture' AND lms_module_id IS NOT NULL
+          GROUP BY lms_module_id
+         HAVING COUNT(*) > 0 AND SUM(CASE WHEN watched_at IS NOT NULL THEN 1 ELSE 0 END) = COUNT(*)`,
+        [authenticatedUserId, courseData.courseId],
+      );
+      for (const chapter of fullyWatchedChapters) {
+        await run(
+          `UPDATE study_tasks SET status = 'completed', completed_at = ?, updated_at = ?
+           WHERE user_id = ? AND status = 'pending' AND task_type = 'study' AND chapter_id = ?`,
+          [now, now, authenticatedUserId, chapter.id]
         );
       }
     }
@@ -366,6 +450,11 @@ export async function POST(request: Request) {
         `SELECT COUNT(*) AS n FROM resources WHERE user_id = ? AND course_id = ? AND kind = 'lecture'`,
         [authenticatedUserId, courseData.courseId]
       ),
+      watched: countRows(
+        `SELECT COUNT(*) AS n FROM resources WHERE user_id = ? AND course_id = ? AND kind = 'lecture' AND watched_at IS NOT NULL`,
+        [authenticatedUserId, courseData.courseId]
+      ),
+      watchedNow: watchedLectures.length,
       assignments: countRows(
         'SELECT COUNT(*) AS n FROM assignments WHERE user_id = ? AND course_id = ?',
         [authenticatedUserId, courseData.courseId]

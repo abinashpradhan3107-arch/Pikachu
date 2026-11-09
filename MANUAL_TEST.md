@@ -21,7 +21,8 @@ You will need:
 5. The card **Cortex LMS Sync 2.0.0** should appear.
 
 **Already loaded from a previous round?** The extension files changed (Moodle
-permission, lecture link/duration/notes capture), so click the **↻ reload**
+permission, lecture link/duration/notes capture, **and the new v6 completion
+probe / video observer**), so click the **↻ reload**
 circular-arrow button on the card, then reload any open LMS tabs.
 
 **Success looks like:**
@@ -215,6 +216,46 @@ Send me those lines verbatim (they contain counts only, no page content).
 
 ---
 
+## Step 12 — Capability 6: automated "Mark as Watched" (no clicks)
+
+1. Reload the extension (Step 0) and open the Masai **Lectures** tab with the
+   console open (`F12` → Console).
+2. Look for the probe line and copy it verbatim:
+   ```
+   [Cortex LMS] completion probe: items=13 matched=0 | data-completed=true=0 class .completed=0 ...
+   ```
+   `matched` and the per-indicator counts tell us which completion indicators
+   actually exist in the live DOM (counts only — no page content).
+3. Open a lecture with a video and let it play past **85%** (scrub the
+   progress bar if you don't want to watch it all).
+4. Look for `[Cortex LMS] video completion: progress=85%+ known=13 match=url`
+   (the match may also say `heading` or `page-title`; `match=none` means the
+   lecture could not be identified — copy the line either way).
+5. Switch to the Cortex tab (just focus it — **do not press F5**) and open
+   `/dashboard`.
+
+**Success looks like:**
+- The lecture no longer appears in the **Catch-up backlog** (count dropped)
+  and shows a green watched state on `/courses` and `/lms` — with **zero
+  clicks**.
+- On `/plan` or `/dashboard`, the study task for that lecture is marked
+  completed automatically.
+- The **Mark watched** button is still there as a fallback, but you did not
+  need it.
+
+**Failure looks like:**
+- `match=none` on the video line, or `matched=0` on the probe line while the
+  LMS clearly shows a green tick → copy both lines to me; they name exactly
+  which indicator to add. Nothing is guessed, so an unrecognised indicator
+  simply stays unmarked.
+- Backlog only drops after pressing `F5` → the focus refetch did not run;
+  tell me which page you were on.
+- A lecture you did **not** watch shows as watched → copy the probe line
+  immediately (a probe matched structurally); the manual **Mark unwatched**
+  button restores it while we narrow the selector.
+
+---
+
 ## What to send back
 
 1. Step 0: did the extension load (or reload cleanly), and any red error text?
@@ -224,6 +265,7 @@ Send me those lines verbatim (they contain counts only, no page content).
 5. Step 7–10: for each, "works" or the exact failure text.
 6. Step 6: whether Moodle still worked.
 7. Step 11: the probe lines, if you want Moodle sync.
+8. Step 12: the `completion probe:` line and any `video completion:` line.
 
 Do not paste your LMS password, session cookie, or Moodle token into the chat.
 Diagnostics are stage/counts/errors only — never cookies, tokens, or full page HTML.

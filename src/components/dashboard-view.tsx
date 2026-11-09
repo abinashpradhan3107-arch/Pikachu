@@ -30,6 +30,7 @@ import { useToast } from "@/components/ui/toast";
 import { apiFetch, errorMessage } from "@/lib/client";
 import type { StudyStats } from "@/lib/stats";
 import type { Profile, StudyTask } from "@/lib/types";
+import { useRefreshOnFocus } from "@/lib/use-refresh-on-focus";
 import { cn, formatDate, minutesToLabel, relativeDay, timeWindowLabel } from "@/lib/utils";
 
 type DashboardData = {
@@ -107,6 +108,11 @@ export function DashboardView({ userName }: { userName: string }) {
     setGreeting(greetingFor(new Date().getHours()));
     void load();
   }, [load]);
+
+  // The extension marks lectures watched in the background; refetch when this
+  // tab regains focus so the Catch-up backlog drops them without a manual
+  // refresh (the "Mark as watched" button stays as an optional fallback).
+  useRefreshOnFocus(load);
 
   async function generatePlan() {
     setGenerating(true);

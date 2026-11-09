@@ -28,6 +28,7 @@ import { useToast } from "@/components/ui/toast";
 import { apiFetch, errorMessage } from "@/lib/client";
 import { chapterPriorityBand } from "@/lib/plan/priority";
 import type { Chapter, Course, Exam, Resource } from "@/lib/types";
+import { useRefreshOnFocus } from "@/lib/use-refresh-on-focus";
 import { COURSE_COLORS, cn, daysBetween, minutesToLabel, pct, statusLabel } from "@/lib/utils";
 
 type CourseForm = {
@@ -146,6 +147,10 @@ export function CoursesView({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Extension-synced watched status arrives in the background; refetch on
+  // focus so lecture rows and the Catch-up backlog update immediately.
+  useRefreshOnFocus(load);
 
   const chaptersByCourse = useMemo(() => {
     const map = new Map<string, Chapter[]>();

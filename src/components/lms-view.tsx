@@ -31,6 +31,7 @@ import { EmptyState, LoadingBlock } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { apiFetch, errorMessage } from "@/lib/client";
 import type { Announcement, CalendarEvent, Chapter, Course, Resource } from "@/lib/types";
+import { useRefreshOnFocus } from "@/lib/use-refresh-on-focus";
 import { cn, formatDate, formatDateTime, minutesToLabel, truncate } from "@/lib/utils";
 
 type LmsConnectionInfo = {
@@ -135,6 +136,10 @@ export function LmsView() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Watched status is set by the extension in the background; refetch on
+  // focus so "Synced from LMS" rows show it without a manual refresh.
+  useRefreshOnFocus(load);
 
   const chapterTitleById = useMemo(() => {
     const map = new Map<string, string>();

@@ -3,7 +3,7 @@
 ## Overall Status
 
 - **Build:** passes — `npx tsc --noEmit`, `npm run build` (52 routes, zero TypeScript errors), `npm run lint` (0 errors; 34 warnings, all unused-variable, mostly pre-existing extension JS).
-- **Extension loads in Chrome:** fixed and confirmed loaded by the user (`content script v5 loaded` observed in the console).
+- **Extension loads in Chrome:** fixed and confirmed loaded by the user (`content script v5 loaded` observed in the console); content script is now **v6** (completion probe + video observer) and needs a ↻ reload to emit the new marker.
 - **Login detection:** confirmed working against the live page (`login confirmed - authenticated UI detected`).
 - **Extraction:** confirmed against the live page — `lectures=15` on the Lectures tab, `assignments=13` on the Assignments tab, `course "382"`.
 - **Backend writes:** observed end-to-end in the user's browser on 2026-11-08 — `sync successful, server counts: {"courses":1,"chapters":2,"lectures":13,"assignments":11}`, rows then read back from SQLite. Offline schema suite re-run after the capability work: 41/41 pass.
@@ -21,6 +21,7 @@
 | 3 | Backlog / catch-up + mark-as-watched + auto-reschedule | New `resources.watched_at` column (idempotent `ensureColumn`) and `PATCH /api/resources/:id {watched}` — a two-way toggle that never deletes a row. Catch-up panels on `/dashboard` and `/courses`. `/api/dashboard` calls `rescheduleMissedTasks()` on every read and reports `rescheduled`, so missed tasks roll into the next block automatically. | BUILT BUT UNTESTED |
 | 4 | Exam countdown, priority matrix, weak-subject detection | `chapterPriorityBand()` moved to pure `src/lib/plan/priority.ts` so the browser and the planner run the **same** rules (importing `engine.ts` client-side would pull in `node:sqlite`). High/Medium/Low matrix on `/courses` (nearest exam per course drives the boost; `profile.weak_subjects` matched against chapter/course titles). New `quiz_attempts` table + `/api/quiz-attempts`; `QuizRunner` reports every submitted score; accuracy rows on `/dashboard` and `/progress`; a **20-minute targeted revision** block is injected when weak chapters exist. | BUILT BUT UNTESTED |
 | 5 | Continuous extension observation of LMS tabs | MutationObserver + retry ladder on Masai (existing), now also capturing lecture `url`, duration and document links next to each card. Moodle hosts added to `host_permissions`, `content_scripts` and `web_accessible_resources`; `probeMoodle()` runs on Moodle and logs selector match counts only. | BUILT BUT UNTESTED |
+| 6 | Automated "Mark as Watched" (zero manual clicks) | `content.js` probes every lecture card for completion indicators (`.completed`/`.done`, `[data-completed="true"]`, `[data-status="completed"]`, check/tick SVGs, aria/title labels, `Completed`/`100%` badge text) and sends `completed: boolean` on **every** lecture; probes are scoped per card and log **match counts only** (`completion probe: items=… matched=…`) so they can be checked against the live DOM rather than trusted. An HTML5 `<video>` `timeupdate` listener fires a completion signal past **85%** progress and resolves the lecture by exact URL/heading/title match (never a guess). `extension-sync` sets `resources.watched_at` when `completed === true`, **preserves** any existing `watched_at` (never un-watches), and auto-completes related pending `study_tasks` (exact `resource_url` match, exact title match for tasks planned before links existed, and chapter tasks only when **every** lecture in that chapter is watched; practice/assignment tasks untouched). `/dashboard`, `/courses` and `/lms` refetch on tab focus so the status appears immediately and watched lectures drop out of the Catch-up backlog automatically; the manual button stays only as a fallback. | BUILT BUT UNTESTED |
 
 Explicitly **NOT DONE**:
 
@@ -28,7 +29,7 @@ Explicitly **NOT DONE**:
 - **Moodle content extraction** — NOT DONE. Blocked on observing real Moodle markup (`probeMoodle()` output).
 - **Assignment due dates** — NOT DONE for the Masai LMS: its rendered dates (`1 Nov, 11:45 AM - 12:20 PM (IST)`) are not machine-parseable, so `due_at` stays `NULL` and the "Due this week"/"Overdue" tiles read 0.
 
-**NEEDS MY INPUT:** reload the extension and re-run a sync so the new `url` / `duration / notes` capture can be confirmed against the live page; supply the Moodle probe output if Moodle sync is wanted.
+**NEEDS MY INPUT:** reload the extension and re-run a sync so the new `url` / `duration / notes` capture can be confirmed against the live page; report the `[Cortex LMS] completion probe:` counts from a lecture list (so a probe that matches structurally — e.g. `class .done=13` on every card — can be narrowed before it marks everything watched); supply the Moodle probe output if Moodle sync is wanted.
 
 
 ---
@@ -211,23 +212,34 @@ the dashboard now shows the *result* (backlog, rescheduled count, accuracy).
 
 1. Reload the extension at `chrome://extensions` — `manifest.json`,
    `content.js` and `background.js` all changed in this round (Moodle hosts,
-   url/duration/notes capture).
+   url/duration/notes capture, and the v6 completion probe / video observer).
 2. Open the Masai **Lectures** tab and let it sync; confirm `counts` now
    includes `notes`, and check `/courses` → expanded course → **"LMS Lectures
    & Resources"** shows durations and working Open-in-LMS links (the 13
    existing rows have `url = NULL` and should be repaired by the additive
    update on the next sync).
-3. Toggle **Mark watched** on one lecture and confirm it sticks after a
-   refresh, then check the Catch-up backlog count drops on `/dashboard`.
-4. Generate a plan and confirm tasks show time slots (`6:00 PM – 7:30 PM`).
-5. Take a quiz so `quiz_attempts` has a row, then confirm `/progress` shows
+3. **Automated watched (new):** on the Lectures tab, read the
+   `[Cortex LMS] completion probe: items=13 matched=…` line from the console
+   and report it — this shows which completion indicators actually exist in
+   the live DOM. Then watch a lecture video past 85% and look for
+   `[Cortex LMS] video completion: progress=… match=url|heading|page-title`;
+   the lecture's `watched_at` should appear in Cortex with **no click** and
+   its study task should turn completed on `/plan` / `/dashboard`.
+4. Switch back to the Cortex tab (focus it) — the Catch-up backlog must drop
+   the watched lecture without a manual refresh. The **Mark as watched**
+   button remains only as an optional fallback.
+5. Toggle **Mark watched** manually on one lecture and confirm it sticks after
+   a refresh, then check the Catch-up backlog count drops on `/dashboard`.
+6. Generate a plan and confirm tasks show time slots (`6:00 PM – 7:30 PM`).
+7. Take a quiz so `quiz_attempts` has a row, then confirm `/progress` shows
    the accuracy badge.
-6. If Moodle sync is wanted: open a Moodle course page and report the
+8. If Moodle sync is wanted: open a Moodle course page and report the
    `[Cortex LMS] moodle probe` lines from the console so real selectors can
    be adopted.
 
 ---
 
-*Status updated after building the five product capabilities. Offline suites:
-route 41/41, origin 4/4, payload 4/4; `npm run build` and `npm run lint`
-(0 errors) pass. Nothing in this round has been observed in a browser yet.*
+*Status updated after adding automated watched detection (capability 6).
+Offline suites: route 66/66, origin 4/4, payload 6/6, plan 8/8;
+`npm run build` (52 routes) and `npm run lint` (0 errors) pass. Nothing in
+this round has been observed in a browser yet.*

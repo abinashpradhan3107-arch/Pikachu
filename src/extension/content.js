@@ -115,8 +115,10 @@ function handleDOMChange(_mutations) {
  * Trigger resync after navigation
  */
 function triggerResync() {
-  // Send message to background to check for updates
-  notifyBackground({ type: 'check-for-updates' });
+  // SPA navigation in this tab: re-extract and sync from here. The
+  // background's 'check-for-updates' case has no payload to send, so the
+  // content script drives the resync itself.
+  void performExtraction();
 }
 
 /**
@@ -362,6 +364,219 @@ function cardMaterialLinks(item, lectureUrl) {
   return found;
 }
 
+// ============================================================
+// Automated "Mark as Watched" detection
+//
+// The live LMS DOM has never been observed WITH a completion indicator
+// visible, so no completion selector can be assumed to exist. Every candidate
+// below is PROBED at runtime and scoped to a single lecture card: a lecture is
+// only marked completed when an element actually matches, and match COUNTS
+// (never page HTML) are logged so the probes can be verified against the real
+// page rather than trusted blindly.
+// ============================================================
+
+// Candidates to check beside each lecture item (green checks / completed
+// states / 100% badges, per the product spec). Unsupported selectors in a
+// given browser are treated as "no match", never as an error.
+const COMPLETION_PROBES = [
+  ['data-completed=true', '[data-completed="true"]'],
+  ['data-status=completed', '[data-status="completed"]'],
+  ['data-state=completed', '[data-state="completed"]'],
+  ['data-done=true', '[data-done="true"]'],
+  ['class .completed', '.completed'],
+  ['class .done', '.done'],
+  ['class .is-completed', '.is-completed'],
+  ['class .is-done', '.is-done'],
+  ['class .watched', '.watched'],
+  ['aria completed', '[aria-label*="completed" i]'],
+  ['aria watched', '[aria-label*="watched" i]'],
+  ['title completed', '[title*="completed" i]'],
+  ['img alt completed', 'img[alt*="completed" i]'],
+  ['svg check', 'svg[class*="check" i]'],
+  ['svg tick', 'svg[class*="tick" i]'],
+  ['svg complete', 'svg[class*="complete" i]'],
+  ['testid completed', '[data-testid*="completed" i]'],
+  ['testid watched', '[data-testid*="watched" i]'],
+];
+
+// Badge-like leaf text inside a card ("Completed", "Watched", "100%"). The
+// regex is anchored so a lecture TITLE containing those words never matches.
+const COMPLETION_BADGE_RE =
+  /^(?:\d{1,3}%\s*)?(?:completed|watched|done)$|^\d{1,3}%$/i;
+
+// Per-extraction probe tally { name: count }, reset before each pass.
+let completionCounts = {};
+let completionMatchedItems = 0;
+let lastCompletionLog = '';
+
+/**
+ * Probe one lecture card for completion indicators.
+ * @param {Element} item - a [data-testid="lecture-list-item"] card
+ * @returns {boolean} true only when an element actually matched
+ */
+function probeLectureCompletion(item) {
+  let matched = false;
+  const countMatches = (name, selector) => {
+    let n = 0;
+    try {
+      n = item.querySelectorAll(selector).length;
+      if (item.matches && item.matches(selector)) n += 1;
+    } catch (_e) {
+      n = 0; // selector unsupported in this browser - honest no-match
+    }
+    if (n > 0) {
+      completionCounts[name] = (completionCounts[name] || 0) + n;
+      matched = true;
+    }
+  };
+  COMPLETION_PROBES.forEach(([name, selector]) => countMatches(name, selector));
+
+  const badge = [...item.querySelectorAll('*')].some(
+    (el) =>
+      !el.children.length &&
+      COMPLETION_BADGE_RE.test((el.innerText || el.textContent || '').trim())
+  );
+  if (badge) {
+    completionCounts['badge text'] = (completionCounts['badge text'] || 0) + 1;
+    matched = true;
+  }
+  return matched;
+}
+
+/** Log probe counts (counts only) whenever they change - one line, no HTML. */
+function logCompletionProbe(itemCount) {
+  const names = COMPLETION_PROBES.map(([name]) => name).concat(['badge text']);
+  const parts = names.map((name) => `${name}=${completionCounts[name] || 0}`);
+  const signature =
+    `items=${itemCount} matched=${completionMatchedItems} | ${parts.join(' ')}`;
+  if (signature === lastCompletionLog) return;
+  lastCompletionLog = signature;
+  console.log(`[Cortex LMS] completion probe: ${signature}`);
+}
+
+// ============================================================
+// Video playback completion (>= 85% progress)
+//
+// knownLectures persists across SPA navigations: a video page may not render
+// the lecture list, but the lecture cards seen earlier in this tab still let
+// the completion be attributed - by EXACT url or EXACT heading/title match
+// only. When nothing matches, nothing is marked (no guessed mapping).
+// ============================================================
+
+const VIDEO_WATCH_RATIO = 0.85;
+let knownLectures = []; // full lecture objects seen on previous passes
+const forcedCompletedIds = new Set();
+let lastVideoLogAt = 0;
+
+function rememberLectures(lectures) {
+  lectures.forEach((lecture) => {
+    const known = knownLectures.find((item) => item.id === lecture.id);
+    if (known) {
+      // Later passes may capture a link the first pass missed - fill it in.
+      if (lecture.url && !known.url) known.url = lecture.url;
+    } else {
+      knownLectures.push({ ...lecture });
+    }
+  });
+}
+
+/** Normalise a URL for equality checks: no hash, no trailing slash. */
+function normalizeUrl(href) {
+  try {
+    const url = new URL(href, location.href);
+    url.hash = '';
+    return url.href.replace(/\/$/, '');
+  } catch (_e) {
+    return '';
+  }
+}
+
+/**
+ * Resolve the lecture being watched on a video page.
+ * Evidence only: exact URL, then an exact heading, then the page title
+ * containing the exact lecture title. Returns null when nothing matches.
+ */
+function resolveWatchedLecture() {
+  const pageUrl = normalizeUrl(location.href);
+  if (pageUrl) {
+    const byUrl = knownLectures.find(
+      (lecture) => lecture.url && normalizeUrl(lecture.url) === pageUrl
+    );
+    if (byUrl) return { lecture: byUrl, method: 'url' };
+  }
+  const heading = document.querySelector('h1');
+  const headingText = heading ? (heading.innerText || '').trim() : '';
+  if (headingText) {
+    const byHeading = knownLectures.find(
+      (lecture) => lecture.title && lecture.title === headingText
+    );
+    if (byHeading) return { lecture: byHeading, method: 'heading' };
+  }
+  const docTitle = (document.title || '').trim();
+  if (docTitle) {
+    const byTitle = knownLectures.find(
+      (lecture) => lecture.title && docTitle.indexOf(lecture.title) !== -1
+    );
+    if (byTitle) return { lecture: byTitle, method: 'page-title' };
+  }
+  return null;
+}
+
+/** timeupdate handler: fires once watch progress passes 85%. */
+function handleVideoProgress(event) {
+  const video = event.currentTarget;
+  if (video.dataset.cortexDone === '1') return;
+  const duration = Number(video.duration);
+  const current = Number(video.currentTime);
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(current)) return;
+  const progress = current / duration;
+  if (progress < VIDEO_WATCH_RATIO) return;
+
+  const resolved = resolveWatchedLecture();
+  if (!resolved) {
+    // Throttled: this fires ~4x/second. Counts only, no page text.
+    if (Date.now() - lastVideoLogAt > 10000) {
+      lastVideoLogAt = Date.now();
+      console.log(
+        `[Cortex LMS] video completion: progress=${Math.round(progress * 100)}% ` +
+        `known=${knownLectures.length} match=none`
+      );
+    }
+    return;
+  }
+
+  video.dataset.cortexDone = '1';
+  console.log(
+    `[Cortex LMS] video completion: progress=${Math.round(progress * 100)}% ` +
+    `known=${knownLectures.length} match=${resolved.method}`
+  );
+
+  if (forcedCompletedIds.has(resolved.lecture.id)) return;
+  forcedCompletedIds.add(resolved.lecture.id);
+  // Re-extract now so the outgoing payload carries completed=true for it,
+  // then once more after the extraction throttle window in case this call
+  // was skipped by the 2-second guard.
+  void performExtraction();
+  setTimeout(() => {
+    void performExtraction();
+  }, MIN_EXTRACTION_INTERVAL + 150);
+}
+
+/** Attach the progress listener to every HTML5 video on the page (once each). */
+function observeLectureVideos() {
+  const videos = document.querySelectorAll('video');
+  let attached = 0;
+  videos.forEach((video) => {
+    if (video.dataset.cortexWatch === '1') return;
+    video.dataset.cortexWatch = '1';
+    video.addEventListener('timeupdate', handleVideoProgress);
+    attached += 1;
+  });
+  if (attached > 0) {
+    console.log(`[Cortex LMS] video observer: attached=${attached} total=${videos.length}`);
+  }
+}
+
 /**
  * Due date for an assignment: a machine-readable datetime attribute when the
  * LMS exposes one, otherwise the rendered text ("1 Nov, 11:45 AM - ...").
@@ -392,6 +607,10 @@ async function extractCourseData() {
 
   data.courseId = resolveCourseId();
   data.courseTitle = resolveCourseTitle();
+
+  // Reset the completion probe tally for this pass.
+  completionCounts = {};
+  completionMatchedItems = 0;
 
   // ---- Lectures (visible on the Lectures tab) ----
   const lectureItems = document.querySelectorAll('[data-testid="lecture-list-item"]');
@@ -429,8 +648,29 @@ async function extractCourseData() {
     const materials = cardMaterialLinks(item, url);
     if (materials.length) lecture.notes = materials;
 
+    // Automated watched state: an observed indicator on this card, or a
+    // video that already crossed 85% for this lecture. Sent on EVERY lecture
+    // (true or false) so the backend always knows the observed state.
+    const cardCompleted = probeLectureCompletion(item);
+    if (cardCompleted) completionMatchedItems += 1;
+    lecture.completed = cardCompleted || forcedCompletedIds.has(lecture.id);
+
     data.lectures.push(lecture);
   });
+
+  logCompletionProbe(lectureItems.length);
+
+  // Lectures completed from a video page that showed no lecture cards: the
+  // cards were seen earlier in this tab, so re-attach the exact same data
+  // (never invented) with completed=true.
+  forcedCompletedIds.forEach((id) => {
+    if (data.lectures.some((lecture) => lecture.id === id)) return;
+    const known = knownLectures.find((lecture) => lecture.id === id);
+    if (known) data.lectures.push({ ...known, completed: true });
+  });
+
+  rememberLectures(data.lectures);
+  observeLectureVideos();
 
   // ---- Assignments (visible on the Assignments tab) ----
   const assignmentItems = document.querySelectorAll('[data-testid="assignment-list-item"]');
@@ -464,7 +704,7 @@ async function extractCourseData() {
 }
 
 // Version marker so a stale (not-reloaded) content script is obvious.
-console.log('[Cortex LMS] content script v5 loaded on ' + location.href);
+console.log('[Cortex LMS] content script v6 loaded on ' + location.href);
 
 /**
  * Moodle probe - OBSERVATION ONLY, nothing is synced.
@@ -513,6 +753,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((data) => sendResponse(data))
       .catch(() => sendResponse(null));
     return true;
+  }
+  if (message.type === 'check-for-updates') {
+    // Background pings the active LMS tab every 5 minutes - run a pass so
+    // completion state picked up while the tab was idle still syncs.
+    void performExtraction();
+    sendResponse({ status: 'extracting' });
+    return false;
   }
   return false;
 });
