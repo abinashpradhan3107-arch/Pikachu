@@ -9,6 +9,13 @@
 - **Backend writes:** observed end-to-end in the user's browser on 2026-11-08 — `sync successful, server counts: {"courses":1,"chapters":2,"lectures":13,"assignments":11}`, rows then read back from SQLite. Offline schema suite re-run after the capability work: 41/41 pass.
 - **Sync against the real LMS:** observed end-to-end for lectures and assignments (see "Observed in the user's browser"). Lecture `url` / `duration_minutes` / attached notes are new in this round and **BUILT BUT UNTESTED** live.
 - **Moodle (`moodle.iitj.ac.in`):** probe-only content script added. **BUILT BUT UNTESTED** — no Moodle selector has been observed, so it logs match counts and syncs nothing.
+- **Automated watched (capability 6):** observed live in the user's browser on
+  2026-11-09 — `[Cortex LMS] video completion: progress=88% known=13 match=url`,
+  the video page then extracted `lectures=1` (the completed lecture merged in
+  even though no lecture cards were on screen), and the Catch-up backlog
+  dropped the watched lecture on tab focus with **no click**. **NEEDS MY
+  INPUT:** the `completion probe:` counts for card-based indicators (green
+  ticks on the lecture list) were not captured yet.
 
 ---
 
@@ -218,13 +225,12 @@ the dashboard now shows the *result* (backlog, rescheduled count, accuracy).
    & Resources"** shows durations and working Open-in-LMS links (the 13
    existing rows have `url = NULL` and should be repaired by the additive
    update on the next sync).
-3. **Automated watched (new):** on the Lectures tab, read the
+3. **Automated watched (new):** ~~video path~~ **observed live** — `video
+   completion: progress=88% match=url` and the backlog dropped on focus.
+   Still open: on the Lectures tab, read the
    `[Cortex LMS] completion probe: items=13 matched=…` line from the console
    and report it — this shows which completion indicators actually exist in
-   the live DOM. Then watch a lecture video past 85% and look for
-   `[Cortex LMS] video completion: progress=… match=url|heading|page-title`;
-   the lecture's `watched_at` should appear in Cortex with **no click** and
-   its study task should turn completed on `/plan` / `/dashboard`.
+   the live DOM (card-based detection, independent of the video path).
 4. Switch back to the Cortex tab (focus it) — the Catch-up backlog must drop
    the watched lecture without a manual refresh. The **Mark as watched**
    button remains only as an optional fallback.
@@ -239,7 +245,8 @@ the dashboard now shows the *result* (backlog, rescheduled count, accuracy).
 
 ---
 
-*Status updated after adding automated watched detection (capability 6).
-Offline suites: route 66/66, origin 4/4, payload 6/6, plan 8/8;
-`npm run build` (52 routes) and `npm run lint` (0 errors) pass. Nothing in
-this round has been observed in a browser yet.*
+*Status updated after recording the first live observation of capability 6
+(video completion at 88%, focus refetch dropping the backlog). Offline
+suites: route 66/66, origin 4/4, payload 6/6, plan 8/8; `npm run build`
+(52 routes) and `npm run lint` (0 errors) pass. Card-based completion probe
+counts still NEEDS MY INPUT.*
